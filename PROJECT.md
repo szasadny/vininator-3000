@@ -18,8 +18,10 @@ Three prediction targets, all structured (X-Wines ships no review text, so gener
 
 - **Drink-now ranking** — for a target opening year (e.g. 2026), which monogrape wines in the dataset are predicted to be drinking best *right now*? Optional filters by grape and by maximum vintage age (e.g. "sub-5-years" for fresh-style wines).
 - **Age-well ranking** — for the same set of wines, project predicted ratings forward by sweeping `age_at_review` over future opening years. Wines whose predicted trajectory still rises (or peaks late) are the ones to cellar.
+- **Standout-of-the-year ranking** — for each of the next five drinking years (2026, 2027, 2028, 2029, 2030, 2031), surface the handful of wines predicted to drink best *in that specific year*. This is the drink-now score evaluated at six successive opening years and curated into a per-year "what to open this year" shortlist.
+- **Overperformer outliers** — wines predicted to be more special than their peers would suggest: the predicted rating sits well above the leakage-safe peer-group baseline (per-`(GrapeMajority, RegionName)` and per-`(RegionName, Vintage)` mean) by a margin that survives the prediction-interval band. These are the "punching above their weight" picks the model flags as quietly exceptional.
 
-Both rankings are produced offline and published in [RESULTS.md](./RESULTS.md) alongside the modeling findings.
+All four rankings are produced offline and published in [RESULTS.md](./RESULTS.md) alongside the modeling findings.
 
 ---
 
@@ -68,6 +70,8 @@ X-Wines CSVs (test | slim | full)
         │
         ├─► data/processed/recommendations_drink_now.parquet
         ├─► data/processed/recommendations_age_well.parquet
+        ├─► data/processed/recommendations_standout_years.parquet  (2026→2031)
+        ├─► data/processed/recommendations_outliers.parquet        (overperformers)
         │
         ▼
   RESULTS.md  (curated headline tables, ablations, SHAP, recommender outputs)
@@ -174,25 +178,31 @@ Build the final training table with these blocks:
 - Wine type (red/white/rosé/sparkling/dessert/fortified)
 
 **Wine context**
-- Vintage year (int + binned decade for sparser data)
-- Price (log-transform; impute missing with median per `region × grape`)
-- Alcohol %
+- Vintage year
+- `age_at_review` (per-rating, derived from the rating timestamp — the lever the Phase 6 recommender sweeps)
+- Alcohol % (`ABV`) — X-Wines ships no price, so there is no price feature
 
 **Climate block** (from Phase 2) — six absolute metrics + six anomalies = ~12 numerical features, joined on `(region, vintage_year)`.
 
 **Soil & terrain block** (from Phase 2) — CaCO3, pH, clay/sand/silt %, organic carbon, CEC, bulk density, elevation, slope + derived `drainage_class` (categorical) and `calcareous` (boolean), joined on `region` only. Treat as static per region.
 
-**Text-derived features** (from review aggregation)
-- Body, acidity, tannin parsed from standardized phrasing ("med+ acidity", "low tannins"). Regex pass + light cleanup; aggregate per-wine by majority vote across its reviews.
-- Review aggregation must be computed after train/test splitting to avoid leakage between wines appearing in multiple reviews.
-
 **Producer aggregates** (carefully, to avoid leakage)
 - Producer mean rating, std, n_reviews — computed **on the training fold only**.
+
+*(No text-derived features: X-Wines ships no review text. Body and Acidity come as structured labels and are targets, not parsed features.)*
 
 **Canonicalization phase**
 - Canonicalize producer, grape, and region names to reduce duplication and improve grouping consistency.
 
-**Sample weight:** `log(1 + n_ratings)` per wine.
+**Sample weight:** `log(1 + n_ratings)` per wine (summed per cell after aggregation, see below).
+
+**Cell aggregation (critical for both compute and metrics):**
+
+The processed parquets stay one-row-per-rating, but no trainer fits on them directly — `models/dataset.py` collapses to feature cells at load time:
+
+- **Rating model:** every feature is wine-level, `(region, vintage)`-level, or the age itself, so rows sharing `(wine_id, vintage_year, age_at_review)` carry identical feature vectors. Collapsing a cell to (mean rating, summed weight) is *gradient-identical* to raw rows for weighted RMSE — same trees, same early-stopping point — while the full variant shrinks ~7× (15.5M rows → 2.25M cells). This is what makes full-data training fit in 16 GB RAM; without it every full run OOM'd.
+- **Profile + Harmonize models:** Body / Acidity / `pair_*` are constant per wine, so these trainers collapse to one row per `(wine_id, vintage_year)` (~21× smaller: 15.5M rows → 746k wine-vintages) and drop `age_at_review` — a wine-level label cannot depend on when reviewers happened to rate. Eval happens at the same level, so popular wines no longer dominate the metrics.
+- **Quantile heads change meaning deliberately:** trained on cells they band the wine-vintage mean rating (model uncertainty about wine quality — what the recommender's overperformer filter needs) instead of the spread of individual user opinions (so wide the filter would never fire).
 
 **Splitting strategy (critical):**
 
@@ -210,7 +220,12 @@ We predict the structured attributes the dataset actually ships. No retrieval, n
 
 **Rating model — CatBoost regression** *(primary target)*
 
-Handles high-cardinality categoricals natively, trains on CPU, is the boring correct choice. Use `age_at_review` as a first-class numerical feature — this is what makes the Phase 6 recommender possible, since varying `age_at_review` at inference projects the predicted rating to any opening year.
+Handles high-cardinality categoricals natively, trains on CPU, is the boring correct choice. Use `age_at_review` as a first-class numerical feature — this is what makes the Phase 6 recommender possible, since varying `age_at_review` at inference projects the predicted rating to any opening year. Trained on aggregated `(wine, vintage, age)` cells (see Phase 3) with the CPU speed knobs from `configs/rating_v1.yaml` (`max_ctr_complexity: 1`, `one_hot_max_size: 8`, `thread_count: 10`).
+
+**Evaluation happens at two levels**, because per-rating RMSE has a hard floor: the within-cell spread of user opinions is ~0.64 on the full variant against a global std of ~0.74, so even a *perfect* model scores ~0.64 per-rating and the whole model-quality game plays out in a 0.10-RMSE window. The trainers log this floor as `noise_floor` per split.
+
+1. **Per-rating RMSE/MAE** — comparable 1:1 to the baselines below; read it against `noise_floor`, never as an absolute score.
+2. **Cell-level RMSE/MAE** *(headline)* — predicted vs. observed mean rating per `(wine, vintage, age)` cell, weighted by ratings per cell, with the same baseline grid evaluated at the same level. The user-opinion noise averages out here, so this is where the terroir ablation delta is actually visible.
 
 **Baselines to beat** (measured on the full X-Wines variant, in-sample / optimistic; out-of-sample on a `WineID` split will be looser):
 
@@ -220,9 +235,9 @@ Handles high-cardinality categoricals natively, trains on CPU, is the boring cor
 4. Per-`(RegionName, Vintage)` mean — leakage-safe under both wine and future-vintage splits. The number we actually need to beat in production.
 5. Per-`(GrapeMajority, RegionName)` mean — same as (4) but stratified by the dominant grape.
 
-The headline experiment is "rating with terroir block" vs. "rating without terroir block", anchored to baselines (1) and (4-5).
+The headline experiment is "rating with terroir block" vs. "rating without terroir block", anchored to baselines (1) and (4-5), reported at the cell level.
 
-Additional modeling: quantile regression for prediction intervals / confidence bands. The recommender uses these to flag low-confidence picks.
+Additional modeling: quantile regression for prediction intervals / confidence bands. Trained on the same aggregated cells, the 0.1/0.9 heads band the *wine-vintage mean rating* — model uncertainty about wine quality, which is what the recommender needs to flag low-confidence picks (per-rating quantiles would band user disagreement instead, far too wide to be useful).
 
 **Profile model — CatBoost multi-class** *(secondary targets)*
 
@@ -231,11 +246,11 @@ Classifiers trained against the X-Wines `Body` and `Acidity` labels (no `Tannin`
 - `Body` — 5 ordinal classes: `{Very light-bodied, Light-bodied, Medium-bodied, Full-bodied, Very full-bodied}`. Heavy skew: 44% Full, 34% Medium, 11% Very Full, 10% Light, 1% Very Light.
 - `Acidity` — 3 ordinal classes: `{Low, Medium, High}`. **Very heavy skew: 79% High, 18% Medium, 3% Low** — single-class baseline already gets ~79% accuracy; report macro-F1, not accuracy, and consider class weights.
 
-Same feature set as rating.
+Same feature set as rating minus `age_at_review` — both trainers run on the wine-vintage aggregated table (the labels are wine-level constants; see Phase 3), and eval counts each held-out wine-vintage once instead of once per rating.
 
 **Harmonize food-pairing model — CatBoost multi-label** *(secondary target)*
 
-Train a multi-label classifier to predict the top-N Harmonize food-pairing vector (top-30 pairings, already a Phase 3 feature) from the full feature set. Output is a probability per pairing label; threshold per-label using validation-fold F1.
+Train a multi-label classifier to predict the top-N Harmonize food-pairing vector (top-30 pairings, already a Phase 3 feature) from the full feature set minus `age_at_review` (wine-vintage aggregated, like profile). Output is a probability per pairing label; threshold per-label using validation-fold F1.
 
 This is the closest stand-in we have for a tasting profile without review text — "this wine pairs with grilled red meat and aged hard cheese" is a structural claim about body, tannin, and intensity, even if it isn't a flavor descriptor. Evaluated with per-label F1 and Hamming loss on held-out wines.
 
@@ -243,11 +258,11 @@ This is the closest stand-in we have for a tasting profile without review text �
 
 ### Phase 5 — Evaluation & analysis
 
-- **Rating:** RMSE + MAE on held-out wines and held-out future vintages.
-- **Profile:** per-attribute accuracy and macro-F1 against the X-Wines Body / Acidity labels.
-- **Harmonize:** per-label F1 + Hamming loss on held-out wines' actual food-pairing vectors.
-- **SHAP / feature importance on the rating model** — what actually matters? Particular focus on whether the terroir block contributes signal *above* producer + region + grape + price.
-- **Ablations:** drop terroir, drop producer, drop price, drop `age_at_review`. Quantify each block's marginal contribution.
+- **Rating:** per-rating and cell-level RMSE + MAE on held-out wines and held-out future vintages, next to the logged `noise_floor`. The cell-level number is the headline. Interpretation note: the future-vintage split contains wines seen in training (only the vintage is new), so its RMSE is expected to be *lower* than the wine-split RMSE — the two splits answer different questions and are not comparable to each other.
+- **Profile:** per-attribute accuracy and macro-F1 against the X-Wines Body / Acidity labels, one row per held-out wine-vintage.
+- **Harmonize:** per-label F1 + Hamming loss on held-out wine-vintages' actual food-pairing vectors.
+- **SHAP / feature importance on the rating model** — what actually matters? Particular focus on whether the terroir block contributes signal *above* producer + region + grape.
+- **Ablations:** drop terroir, drop producer, drop `age_at_review`. Quantify each block's marginal contribution on the cell-level metric. Ablations retrain the **RMSE head only** — the quantile heads don't affect the ablation conclusion and would triple the cost.
 - **Qualitative sanity check:** pick 10 wines I personally know, predict ratings + Body/Acidity + pairings, eyeball it. Disagreements get written up in RESULTS.md — they're more interesting than the agreements.
 
 ### Phase 6 — Drink-now & age-well recommender
@@ -275,6 +290,25 @@ Same wine set, but score each wine at multiple future opening years (e.g. `openi
 
 Output: a parquet keyed by `(WineID, opening_year, predicted_rating, predicted_rating_lo, predicted_rating_hi)` long-format, plus a derived wide summary (`predicted_peak_year`, `predicted_peak_rating`, `slope_to_peak`) for ranking.
 
+#### Standout-of-the-year ranking
+
+The drink-now score, run across the **next five drinking years (2026 → 2031)**, then curated into one shortlist per year. For each opening year in the window, score every (monogrape, by default) wine at `age_at_review = opening_year - vintage_year` and take the top-N by predicted rating. The point is editorial: "if you're opening a bottle in 2028, here are the wines the model says are at their best *that* year." The same `--grape` / `--max-vintage-age` / `--region` filters as drink-now apply.
+
+Implementation note: this is `drink_now` looped over the year window — no new model, no new feature math. It reuses the same scoring path so a wine's per-year rank is consistent with its standalone drink-now rank.
+
+Output: a long-format parquet keyed by `(opening_year, rank, WineID, WineryName, WineName, RegionName, Vintage, predicted_rating, predicted_rating_lo, predicted_rating_hi, predicted_body, predicted_acidity, top_pairings)`, with `opening_year ∈ {2026..2031}` and `rank` the within-year position.
+
+#### Overperformer outliers
+
+Wines the model flags as **more special than expected** — predicted to outscore their peer group by a margin that isn't explained by region/grape/vintage averages alone. For each wine at its drink-now opening year, compute:
+
+- `peer_baseline` — the leakage-safe expectation for that wine: the max (or mean, configurable) of the per-`(GrapeMajority, RegionName)` and per-`(RegionName, Vintage)` baseline means already built for Phase 4. These are computed **on the training fold only**, consistent with the no-leakage rule.
+- `overperformance = predicted_rating - peer_baseline`.
+
+Rank by `overperformance` descending, and keep only rows where the **lower** confidence bound still clears the baseline (`predicted_rating_lo > peer_baseline`) so a wide prediction interval can't manufacture a fake outlier. The result is a shortlist of quietly exceptional wines — not the highest absolute ratings (those skew to famous producers), but the biggest positive surprises relative to where the wine "should" land.
+
+Output: a parquet keyed by `(WineID, WineryName, WineName, RegionName, Vintage, predicted_rating, peer_baseline, overperformance, predicted_rating_lo, predicted_rating_hi)` sorted by `overperformance` descending.
+
 #### CLI
 
 ```bash
@@ -291,11 +325,22 @@ vininator recommend age-well \
   --grape nebbiolo \
   --top 50 \
   --out data/processed/recommendations_age_well.parquet
+
+vininator recommend standout-years \
+  --from-year 2026 \
+  --to-year 2031 \
+  --top 10 \
+  --out data/processed/recommendations_standout_years.parquet
+
+vininator recommend outliers \
+  --opening-year 2026 \
+  --top 50 \
+  --out data/processed/recommendations_outliers.parquet
 ```
 
-Both subcommands print the top-N to stdout (rich table) and write a parquet for downstream RESULTS.md table generation.
+All subcommands print the top-N to stdout (rich table) and write a parquet for downstream RESULTS.md table generation. `standout-years` and `outliers` share the `--grape` / `--max-vintage-age` / `--region` / `--monogrape` filters with `drink-now`.
 
-**Deliverable:** `src/vininator/recommend/{drink_now.py, age_well.py}`, CLI wired into `cli.py`, and the two recommendation parquets under `data/processed/`.
+**Deliverable:** `src/vininator/recommend/{drink_now.py, age_well.py, standout_years.py, outliers.py}`, CLI wired into `cli.py`, and the four recommendation parquets under `data/processed/`. `standout_years.py` and `outliers.py` reuse `drink_now`'s scoring path rather than re-implementing it.
 
 ### Phase 7 — Findings publication (RESULTS.md)
 
@@ -305,13 +350,14 @@ The final deliverable. A self-contained writeup at the project root that someone
 
 1. **Headline result.** One paragraph: did terroir help, by how much (RMSE delta), and what's the honest takeaway. No burying.
 2. **Setup.** Dataset variant used, train/test/future-vintage split sizes, seed, git SHA, MLflow / W&B run links.
-3. **Rating model.** RMSE + MAE table for the random wine-split and the future-vintage split, against all five baselines. Confidence intervals. The ablation grid (drop terroir / drop producer / drop price / drop age) as a single table.
+3. **Rating model.** Per-rating and cell-level RMSE + MAE tables for the random wine-split and the future-vintage split, against the baseline grid and the noise floor. Confidence intervals. The ablation grid (drop terroir / drop producer / drop age) as a single table.
 4. **Profile + Harmonize models.** Macro-F1 by class, confusion matrices for Body and Acidity, per-label F1 and example pairings for Harmonize.
 5. **SHAP analysis.** Top features by mean absolute SHAP, plus 3–4 dependence plots for the most interesting terroir variables (GDD, harvest-month precip, calcareous flag, ...).
 6. **Drink-now and age-well tables.** Curated headline tables from Phase 6: top-10 monogrape picks for 2026 drinking across the major grapes (Cabernet Sauvignon, Pinot Noir, Chardonnay, Riesling, Nebbiolo, Tempranillo, ...), and top-10 age-well picks per grape with their projected peak years. Each table cites the recommender command that produced it.
-7. **Qualitative sanity check.** The 10 known-wines results from Phase 5, with commentary on where the model agreed and where it didn't.
-8. **Limitations & caveats.** Pulled from the disclaimer block already in the README, plus model-specific caveats discovered during evaluation.
-9. **Reproduction.** The exact CLI sequence to rebuild every artifact from a fresh clone.
+7. **Standout-of-the-year and overperformer tables.** One shortlist of standout wines per drinking year across 2026 → 2031 (the "what to open this year" picks), and the overperformer-outlier table — wines predicted to be more special than their peer-group baseline, ranked by `overperformance` with their confidence band. Each cites the recommender command that produced it.
+8. **Qualitative sanity check.** The 10 known-wines results from Phase 5, with commentary on where the model agreed and where it didn't.
+9. **Limitations & caveats.** Pulled from the disclaimer block already in the README, plus model-specific caveats discovered during evaluation.
+10. **Reproduction.** The exact CLI sequence to rebuild every artifact from a fresh clone.
 
 **Deliverable:** `RESULTS.md` at the repo root, plus the supporting figures under `reports/figures/` (SHAP plots, ablation charts, recommender summary tables). RESULTS.md is regenerated from the trained models and recommendation parquets — no manual numbers typed by hand. A small `scripts/build_results.py` (or notebook 08) emits the markdown tables and figure files.
 
@@ -348,8 +394,10 @@ vininator/
 │   │   ├── metrics.py
 │   │   └── ablations.py
 │   ├── recommend/
-│   │   ├── drink_now.py    # score wines at opening_year, rank by predicted rating
-│   │   └── age_well.py     # sweep opening_year forward, find rising/peaking trajectories
+│   │   ├── drink_now.py        # score wines at opening_year, rank by predicted rating
+│   │   ├── age_well.py         # sweep opening_year forward, find rising/peaking trajectories
+│   │   ├── standout_years.py   # per-year standout shortlists across 2026→2031
+│   │   └── outliers.py         # overperformers: predicted rating vs. peer-group baseline
 │   └── cli.py              # typer CLI: vininator train rating, vininator recommend, etc.
 ├── scripts/
 │   └── build_results.py    # emits RESULTS.md tables + reports/figures from trained artifacts
@@ -388,8 +436,10 @@ vininator/
 - **SoilGrids is fast but flaky.** Single-pixel queries can be noisy and the endpoint occasionally 5xxs. Always buffer-and-average, always retry with backoff, always cache.
 - **Geocoding has rate limits.** Nominatim asks for 1 req/sec. A few thousand regions is fine, just plan for it.
 - **Geocode `result_type` lies sometimes.** Nominatim happily resolves a wine-region string to a city, monument, or random POI when the appellation isn't in OSM under that exact name. The resulting `status='ok'` row points at the wrong place, and SoilGrids returns null on top of that wrong location. Audit the `result_type` distribution after the geocode pull and filter to a known-good whitelist (administrative / region / locality / hamlet / etc.) before training. Examples encountered in PR2 smoke: "Buenos Aires" → `city`, "Scanderbeg" → `square`.
-- **The full X-Wines variant is 21M ratings.** Plenty of data, but for iteration always work off the `slim` variant (150k ratings) — full is for the final training run.
-- **Producer (`WineryID`) will dominate everything.** Be ready for the result that terroir adds a few percent RMSE improvement on top of producer + region + grape + price. That's still a real, interesting result — just not the headline "weather predicts wine" story. Frame the project honestly around this from the start.
+- **The full X-Wines variant is 21M ratings.** Plenty of data, but for iteration always work off the `slim` variant (150k ratings) or `--sample-frac` — full is for the final training run.
+- **Full-data training only fits in 16 GB RAM because of cell aggregation.** The raw train split is 15.5M rows (~6 GB in polars, doubled at the pandas boundary, plus CatBoost's quantized pool) — every pre-aggregation full run died on memory. Aggregated (2.25M cells for rating, ~450k wine-vintages for profile/harmonize) the whole Phase 4 sequence runs in an evening on the 12-core box with `thread_count: 10` keeping the machine usable. Don't undo this by materializing raw-row pools "just to check something" — check on `slim`.
+- **Per-rating RMSE is floored at ~0.64 by user disagreement.** A flat validation curve near that floor is the ceiling being hit, not a learning-rate problem. Diagnose model changes on the cell-level metric.
+- **Producer (`WineryID`) will dominate everything.** Be ready for the result that terroir adds a few percent RMSE improvement on top of producer + region + grape. That's still a real, interesting result — just not the headline "weather predicts wine" story. Frame the project honestly around this from the start.
 - **Coverage is skewed toward popular regions.** The model will be best at well-represented regions and worse at obscure ones. Check and report this explicitly.
 - **Splits matter.** Split by `WineID`, not by rating. Future-vintage split reveals real terroir learning vs. memorization.
 - **`age_at_review` is real but bounded.** `Date` covers 2012-2021, so ratings of pre-2012 vintages are over-represented at high ages; ratings of recent vintages are absent at high ages. Treat `age_at_review` as a feature, not a target.

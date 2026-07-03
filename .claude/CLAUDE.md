@@ -1,12 +1,14 @@
-# Vininator 3000 — Wine Rating & Tasting-Notes Predictor
+# Vininator 3000 — Wine Rating & Profile Predictor
 
 ## Domain
 
-ML project that predicts Vivino-style wine ratings and tasting notes from grape, region, vintage, and producer — augmented with a **terroir feature block** that combines NASA POWER daily climate (MERRA-2 + CERES SYN1DEG) per `(region, vintage_year)` with SoilGrids soil/terrain properties per `region`.
+ML project that predicts wine ratings, structured profile (body/acidity), and food-pairing vectors from grape, region, vintage, producer, and `age_at_review` — augmented with a **terroir feature block** that combines NASA POWER daily climate (MERRA-2 + CERES SYN1DEG) per `(region, vintage_year)` with SoilGrids soil/terrain properties per `region`. A recommender sweeps `age_at_review` over opening years to produce drink-now / age-well / standout-year / overperformer rankings.
 
-Primary dataset: **WineSensed** (`Dakhoo/L2T-NeurIPS-2023` on HuggingFace, CC BY-NC-ND 4.0). ~824k Vivino reviews, ~40k with full structured attributes (the real working set).
+Primary dataset: **X-Wines** (`rogerioxavier/X-Wines` on GitHub, CC0 1.0). Full variant: ~100k wines / 21M ratings, every rating timestamped with its rated vintage — which is what makes `age_at_review` a real per-row feature. No review text, no images: all targets are structured labels.
 
-For the full plan, phases, and sequencing, see [PROJECT.md](./PROJECT.md). That document is the source of truth for what we're building and in what order. This file is the source of truth for *how* we work.
+The deliverable is trained models plus findings published in RESULTS.md — batch / CLI only, no hosted API or frontend.
+
+For the full plan, phases, and sequencing, see [PROJECT.md](../PROJECT.md). That document is the source of truth for what we're building and in what order. This file is the source of truth for *how* we work.
 
 ---
 
@@ -17,16 +19,14 @@ For the full plan, phases, and sequencing, see [PROJECT.md](./PROJECT.md). That 
 | Language | Python 3.12 |
 | Env / deps | `uv` (lockfile committed) |
 | Data | `polars` (preferred over pandas for the main tables) |
-| ML | `catboost` (primary), `scikit-learn` (utilities), `sentence-transformers` (text embeddings) |
+| ML | `catboost` (primary), `scikit-learn` (utilities) |
 | Weather | NASA POWER Daily API (MERRA-2 + CERES SYN1DEG, JSON, no auth) |
 | Soil | SoilGrids REST API (ISRIC), no auth |
-| Terrain | SRTM 30 m via `elevation` or Open-Elevation |
+| Terrain | SRTM 30 m via Open-Elevation |
 | Geocoding | `geopy` (Nominatim) |
-| Experiment tracking | `mlflow` *or* `wandb` — pick one in week 1, stick with it |
-| API | FastAPI + uvicorn |
-| Frontend | React + TypeScript + Vite + Tailwind |
-| Hosting | Cloudflare Pages (static frontend) + Fly.io / HF Spaces (backend) + R2 / B2 (terroir cache) |
-| Lint / test | ruff + pytest + pytest-asyncio |
+| Experiment tracking | `mlflow` (local file store in `mlruns/`) |
+| CLI | `typer` + `rich` |
+| Lint / test | ruff + pytest |
 
 ---
 
@@ -34,27 +34,22 @@ For the full plan, phases, and sequencing, see [PROJECT.md](./PROJECT.md). That 
 
 ```text
 src/vininator/
-  data/         # WineSensed loader, geocoding (cached, resumable)
-  features/     # climate.py (NASA POWER → GDD/precip/anomalies), soil.py, terroir.py (joiner), text.py (parse body/acidity/flavors), build.py (assemble final table)
-  models/       # rating.py, profile.py, tags.py, notes.py — one file per target (notes is retrieval-only, no generative)
+  data/         # X-Wines loader, geocoding (cached, resumable)
+  features/     # climate.py (NASA POWER → GDD/precip/anomalies), soil.py, terroir.py (joiner), text.py (Harmonize parsing), build.py (assemble final table)
+  models/       # dataset.py (shared feature contract + cell aggregation), rating.py, profile.py, harmonize.py, artifacts.py, tracking.py
   eval/         # metrics, ablations, SHAP
-  api/          # FastAPI app (main, routes, schemas, service, terroir_provider — cache-first live NASA POWER + SoilGrids fetch)
+  recommend/    # drink_now.py, age_well.py, standout_years.py, outliers.py (Phase 6)
   cli.py        # typer CLI entrypoint: `vininator train rating`, etc.
 
-frontend/src/
-  lib/          # api client, app-wide constants
-  types/        # shared TS types — mirror API schemas, single source of truth
-  components/   # small, composable, no business logic
-  pages/        # one folder per route
-
 data/
-  raw/          # WineSensed dump, NASA POWER JSON pulls, SoilGrids responses — never modified after write
+  raw/          # X-Wines CSVs + parquets, NASA POWER JSON pulls — never modified after write
   interim/      # geocoded regions, climate.parquet, soil.parquet, terroir.parquet
-  processed/    # final feature parquets (train/test/future_vintage)
+  processed/    # final feature parquets (train/test/future_vintage) + recommendation parquets
+  models/       # trained bundles (.cbm + .meta.json), gitignored
 
-notebooks/      # 01_eda, 02_climate, 03_soil, 04_rating_baseline, 05_rating_terroir, 06_tags, 07_ablations
+notebooks/      # exploration only — see PROJECT.md §5 for the numbered list
 configs/        # yaml per experiment
-deploy/         # fly.toml / Dockerfile / Pages config / cron warmer
+scripts/        # build_results.py — emits RESULTS.md tables + figures
 tests/
 ```
 
@@ -67,16 +62,10 @@ tests/
 **Python**
 - Ruff (formatter + linter). Type hints everywhere. `from __future__ import annotations` at the top of every module.
 - All public functions get docstrings; explain *why*, not *what*.
-- Pydantic v2 for API schemas. Plain dataclasses or `TypedDict` for internal config.
-- `async def` for API routes and any I/O-bound work; sync is fine for CPU-bound ML code.
+- Pydantic v2 for settings (`config.py`). Plain frozen dataclasses for internal config and reports.
+- Sync code throughout — this is a batch/CLI project; external fetches are rate-limited sequential loops, not async.
 - Pathlib only — never `os.path.join`.
 - No hardcoded paths. All paths come from `src/vininator/config.py` (which reads env vars with defaults).
-
-**Frontend**
-- Strict TS, no `any`. If you reach for `any`, fix the type instead.
-- Functional components + hooks. Components stay small.
-- API client generated from FastAPI's OpenAPI spec (orval or openapi-typescript) once the spec stabilises — until then, a thin hand-written client in `lib/api.ts`.
-- All labels, durations, role names, and other string constants live in `lib/constants.ts`. Never inline.
 
 **General**
 - `.env` for local config; never committed.
@@ -88,15 +77,17 @@ tests/
 
 These are the rules that protect the *headline result*. They are non-negotiable.
 
-- **Split by `wine_id`, not by review.** Same wine in train and test is leakage. Every split function in `src/vininator/data/` must enforce this.
-- **Future-vintage holdout.** In addition to the random wine-id split, hold out vintages 2019–2021 as a separate test set. This is how we tell whether the model learned terroir or just memorized region averages.
+- **Split by `wine_id`, not by review.** Same wine in train and test is leakage. Every split function must enforce this — including the early-stopping validation fold inside the trainers.
+- **Future-vintage holdout.** In addition to the random wine-id split, hold out vintages 2019–2021 as a separate test set. Note it contains *wines seen in training* (only the vintage is new), so its RMSE is not comparable to the wine-split RMSE — it answers "does the model generalize to a new year of a known wine", not "to a new wine".
+- **Train on aggregated feature cells, never raw rating rows.** All features are wine-level, `(region, vintage)`-level, or the age itself, so rating rows sharing `(wine_id, vintage_year, age_at_review)` are duplicates. `models/dataset.aggregate_rating_cells` collapses them (loss-exact for weighted RMSE, ~7× smaller); wine-level targets (body/acidity/pair_*) go through `aggregate_wine_vintage` (~21× smaller, drops `age_at_review`). This is what makes full-variant training fit in 16 GB RAM. Any new feature that varies inside a cell must extend the cell keys or become metadata — there's a test guarding this.
+- **Report the rating headline at cell level.** Per-rating RMSE is floored by within-cell user disagreement (~0.64 vs. a global std of ~0.74 on the full variant), so terroir deltas drown in it. The headline metric is weighted cell-level RMSE (predicted vs. observed mean rating per wine/vintage/age); per-rating RMSE is reported next to the logged `noise_floor` for baseline comparability.
 - **No target leakage in producer aggregates.** Producer mean-rating / std / n_reviews features are computed **on the training fold only**, then applied to test. Never compute on the full dataset.
 - **Cache every external call.** NASA POWER, SoilGrids, and Nominatim are all rate-limited and intermittently fail. Every external fetch goes through a function that checks a parquet/sqlite/json cache first, writes the result atomically, and is resumable across restarts.
 - **Raw data is immutable.** Files in `data/raw/` are never modified after write. Cleaning and joining happen on the way to `data/interim/` and `data/processed/`.
 - **Track every experiment.** MLflow/W&B from run #1. Hyperparameters, dataset hash, git SHA, metrics, feature list — all logged. "I'll start tracking once it works" never happens.
 - **Report ablations honestly.** The headline experiment compares rating-with-terroir vs. rating-without. If terroir adds 1% RMSE, that's the result — don't bury it.
-- **Sample weighting.** Use `log(1 + n_ratings)` per wine. A wine with 5000 ratings is a different signal than a wine with 5.
-- **Live serving needs the same features as training.** The model is trained on historical vintages but the API must answer for any `(region, vintage_year)` — including this year's. All on-demand terroir fetches go through `api/terroir_provider.py`, which is cache-first (in-process LRU → SQLite → R2/B2 → live NASA POWER + SoilGrids). Inference paths never reach the upstream APIs directly.
+- **Sample weighting.** Use `log(1 + n_ratings)` per wine (summed per cell after aggregation). A wine with 5000 ratings is a different signal than a wine with 5.
+- **The recommender never re-engineers features.** Phase 6 scores only wines already in X-Wines by sweeping `age_at_review`; vintage (and therefore terroir) is held constant, so there is no live terroir fetch and no inference path to the upstream APIs.
 
 ---
 
@@ -105,12 +96,10 @@ These are the rules that protect the *headline result*. They are non-negotiable.
 Before implementing something in-house, check whether a stable, maintained library already solves it.
 
 - **Boosted trees** → `catboost`. Native categoricals (don't manually target-encode).
-- **Text embeddings** → `sentence-transformers`. Don't train your own.
 - **Weather data** → NASA POWER Daily API. MERRA-2 quality via clean JSON, no auth, public domain. Don't scrape weather sites; don't reach for raw NetCDF / xarray when a clean JSON wrapper exists.
 - **Geocoding** → `geopy` with Nominatim. Don't write a CSV of regions by hand.
-- **Experiment tracking** → MLflow or W&B. Don't roll your own logging.
-- **API framework** → FastAPI. Don't hand-write a Flask service.
-- **General rule:** if a maintained PyPI/npm package solves ≥80% of the problem, use it. Reinventing is more bugs and more maintenance.
+- **Experiment tracking** → MLflow (already wired in `models/tracking.py`). Don't roll your own logging.
+- **General rule:** if a maintained PyPI package solves ≥80% of the problem, use it. Reinventing is more bugs and more maintenance.
 
 ---
 
@@ -118,16 +107,16 @@ Before implementing something in-house, check whether a stable, maintained libra
 
 Write code for the developer maintaining it 12 months from now.
 
-- **No magic values.** Thresholds, paths, hyperparameter defaults, growing-season month ranges, the flavor-tag vocabulary — all live in `src/vininator/config.py` or a yaml in `configs/`. Frontend constants live in `frontend/src/lib/constants.ts`.
+- **No magic values.** Thresholds, paths, hyperparameter defaults, growing-season month ranges, vocabulary sizes — all live in `src/vininator/config.py` or a yaml in `configs/`.
 - **Single source per piece of behaviour.** Splitting logic, feature assembly, model loading — each defined once and reused. If you find yourself writing the same block in a second file, lift it.
 - **Layering.**
   - `data/` → reads raw, returns dataframes. No feature engineering.
   - `features/` → takes dataframes, returns dataframes with new columns. No model training.
   - `models/` → takes processed dataframes, returns trained model artifacts + metrics. No file I/O outside the canonical paths.
-  - `api/` → loads model artifacts at startup, serves predictions. Never re-trains, never re-engineers features inline.
+  - `recommend/` → loads saved bundles, scores wines at opening years. Never re-trains, never re-engineers features inline.
   - `cli.py` → the only place that orchestrates phases end-to-end.
 - **Notebooks are not production.** Exploration lives in `notebooks/`. Once a finding is real, the code moves into `src/vininator/`. Notebooks may import from the package but the package never imports from a notebook.
-- **Think at scale.** Don't `pd.read_csv` the 800k-row WineSensed file then filter; use polars lazy + `scan_parquet` + predicate pushdown. The dataset is small enough to fit in RAM but big enough that lazy beats eager every time.
+- **Think at scale — the box has 16 GB RAM and no CUDA GPU.** The full X-Wines ratings table is 21M rows; use polars lazy + `scan_parquet` + predicate pushdown, aggregate before the polars→pandas boundary, and free large frames (`del` + `gc.collect()`) as soon as their derived artifacts exist. The raw frame does not fit next to its pandas copy.
 - **Reproducibility.** Set seeds. Log dataset hashes. The train script should produce the same metrics on a fresh checkout given the same config.
 - **Explicit over clever.** A longer, obvious implementation beats a one-liner that requires context.
 - **No half-finished features.** Leave code in the last working state. No disabled blocks, no broken branches in main.

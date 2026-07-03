@@ -1,0 +1,36 @@
+# Rating regressor (Phase 4 headline model) + quantile heads.
+# `vininator train rating --config configs/rating_v1.yaml`
+# The same catboost_params block is reused for the 0.1 / 0.9 quantile heads;
+# only the loss_function is swapped (see models/dataset.resolve_catboost_params).
+#
+# Sized for the local box (12 cores, 16 GB RAM, no CUDA GPU) and the aggregated
+# training table (~2.25M cells on the full variant, down from 15.5M raw rows).
+name: rating_v1
+
+catboost_params:
+  iterations: 1500
+  depth: 8
+  learning_rate: 0.05
+  l2_leaf_reg: 3.0
+  od_type: Iter      # early stopping on the wine-grouped eval fold
+  od_wait: 100
+  task_type: CPU
+  # CPU speed knobs — biggest lever first. Combination CTRs over 8 categorical
+  # features are the dominant CPU cost; capping at single-feature CTRs trades a
+  # sliver of accuracy for a multiple of speed.
+  max_ctr_complexity: 1
+  # Small-cardinality categoricals (wine_type, drainage_class, body, acidity)
+  # skip the CTR machinery entirely and get plain one-hot splits.
+  one_hot_max_size: 8
+  # Leave 2 of the 12 cores free so the machine stays usable during a run.
+  thread_count: 10
+  # Enables the 5-minute crash snapshots in models/rating.py — a killed run
+  # resumes from the last snapshot instead of restarting from scratch.
+  allow_writing_files: true
+
+data:
+  # null = train on the full processed parquets. Override per-run with
+  # `--sample-frac` for a fast smoke test; keep max_rows null for real runs.
+  sample_frac: null
+  max_rows: null
+  seed: 42

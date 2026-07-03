@@ -15,23 +15,21 @@ from typing import Literal
 from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-XWINES_GITHUB_RAW = (
-    "https://raw.githubusercontent.com/rogerioxavier/X-Wines/main/Dataset/last"
-)
+XWINES_GITHUB_RAW = "https://raw.githubusercontent.com/rogerioxavier/X-Wines/main/Dataset/last"
 
 # Filename templates per variant. The slim/full variants live on the project's
 # Google Drive (not in-repo); the test variant ships directly from GitHub.
 XWINES_VARIANTS: dict[str, dict[str, str]] = {
     "test": {
-        "wines_csv":   "XWines_Test_100_wines.csv",
+        "wines_csv": "XWines_Test_100_wines.csv",
         "ratings_csv": "XWines_Test_1K_ratings.csv",
     },
     "slim": {
-        "wines_csv":   "XWines_Slim_1K_wines.csv",
+        "wines_csv": "XWines_Slim_1K_wines.csv",
         "ratings_csv": "XWines_Slim_150K_ratings.csv",
     },
     "full": {
-        "wines_csv":   "XWines_Full_100K_wines.csv",
+        "wines_csv": "XWines_Full_100K_wines.csv",
         "ratings_csv": "XWines_Full_21M_ratings.csv",
     },
 }
@@ -72,13 +70,26 @@ GEOCODE_PARQUET = "geocode.parquet"
 # infrastructure, financial POIs, healthcare, fuel/parking) and keep the long
 # tail. Some bad rows (Buenos Aires-style city centroids) still slip through;
 # the downstream null detection in `compute_soil_features` catches them.
-GEOCODE_BAD_RESULT_TYPES: frozenset[str] = frozenset({
-    "bus_stop", "station", "platform", "halt",
-    "post_office", "post_box",
-    "atm", "bank", "fuel",
-    "hospital", "clinic", "school", "college",
-    "parking", "elevator", "fire_station",
-})
+GEOCODE_BAD_RESULT_TYPES: frozenset[str] = frozenset(
+    {
+        "bus_stop",
+        "station",
+        "platform",
+        "halt",
+        "post_office",
+        "post_box",
+        "atm",
+        "bank",
+        "fuel",
+        "hospital",
+        "clinic",
+        "school",
+        "college",
+        "parking",
+        "elevator",
+        "fire_station",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Soil + DEM
@@ -98,13 +109,20 @@ SOILGRIDS_BASE_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 #   15-30cm thickness 15 → weight 15/30
 SOILGRIDS_DEPTHS: tuple[str, ...] = ("0-5cm", "5-15cm", "15-30cm")
 SOILGRIDS_DEPTH_WEIGHTS: dict[str, float] = {
-    "0-5cm":  5.0 / 30.0,
+    "0-5cm": 5.0 / 30.0,
     "5-15cm": 10.0 / 30.0,
     "15-30cm": 15.0 / 30.0,
 }
 
 SOILGRIDS_PROPERTIES: tuple[str, ...] = (
-    "phh2o", "cec", "clay", "sand", "silt", "soc", "bdod", "cfvo",
+    "phh2o",
+    "cec",
+    "clay",
+    "sand",
+    "silt",
+    "soc",
+    "bdod",
+    "cfvo",
 )
 SOILGRIDS_BUFFER_DEG = 0.005
 SOILGRIDS_RETRIES = 3
@@ -124,14 +142,14 @@ SOILGRIDS_RATE_LIMIT_SEC = 1.0
 #
 # Tuple is (final_divisor, target_unit_label) per property.
 SOILGRIDS_UNIT_CONVERSIONS: dict[str, tuple[float, str]] = {
-    "phh2o": (10.0,  "pH"),
-    "clay":  (10.0,  "%"),
-    "sand":  (10.0,  "%"),
-    "silt":  (10.0,  "%"),
-    "soc":   (10.0,  "g/kg"),
-    "cec":   (10.0,  "cmol(c)/kg"),
-    "bdod":  (100.0, "kg/dm³"),
-    "cfvo":  (10.0,  "vol %"),
+    "phh2o": (10.0, "pH"),
+    "clay": (10.0, "%"),
+    "sand": (10.0, "%"),
+    "silt": (10.0, "%"),
+    "soc": (10.0, "g/kg"),
+    "cec": (10.0, "cmol(c)/kg"),
+    "bdod": (100.0, "kg/dm³"),
+    "cfvo": (10.0, "vol %"),
 }
 
 # Open-Elevation: free, no auth, intermittently down. One POST per region
@@ -293,6 +311,99 @@ PROCESSED_TRAIN_PARQUET = "train.parquet"
 PROCESSED_TEST_PARQUET = "test.parquet"
 PROCESSED_FUTURE_VINTAGE_TEST_PARQUET = "future_vintage_test.parquet"
 
+# ---------------------------------------------------------------------------
+# Phase 4 — Modeling
+# ---------------------------------------------------------------------------
+#
+# These constants describe how the 127-column processed table (see
+# features/build.py) is sliced into model inputs. `models/dataset.py` is the
+# single consumer — it never re-derives the feature split, so changing the
+# contract here changes it for the rating, profile, and harmonize models at
+# once. Grape/pair multi-hot columns are discovered dynamically from the
+# parquet schema (their count is data-driven), so they are not listed here.
+
+# Target columns, one per modeling task.
+RATING_TARGET = "rating"
+PROFILE_TARGETS: tuple[str, ...] = ("body_label", "acidity_label")
+HARMONIZE_TARGET_PREFIX = "pair_"
+
+# Aggregation keys (models/dataset.py). Every feature is either wine-level,
+# (region, vintage)-level, or the age itself — so rating rows sharing these
+# keys carry identical feature vectors and can be collapsed to one weighted
+# row without changing the weighted-RMSE optimum. The full variant shrinks
+# ~7× (15.5M rows → 2.25M cells), which is what makes full-data training fit
+# in 16 GB of RAM.
+RATING_CELL_KEYS: tuple[str, ...] = ("wine_id", "vintage_year", "age_at_review")
+# Wine-level targets (body, acidity, pair_*) are constant per wine; their
+# trainers collapse to one row per (wine, vintage) and drop the age column.
+WINE_VINTAGE_KEYS: tuple[str, ...] = ("wine_id", "vintage_year")
+AGE_COL = "age_at_review"
+# Ratings collapsed into a cell — carried as metadata (never a feature: it is
+# popularity, unknowable for unseen wines) and used to weight cell-level eval.
+CELL_N_RATINGS_COL = "n_ratings_cell"
+
+# Columns that are never features for any model: row identity, the split tag,
+# the loss weight, the review timestamp, the aggregation cell count, and the
+# rating itself (rating is only ever a target). Per-model target columns are
+# excluded on top of these.
+MODEL_METADATA_COLS: tuple[str, ...] = (
+    "rating_id",
+    "wine_id",
+    "rating_date",
+    "split",
+    "sample_weight",
+    "rating",
+    CELL_N_RATINGS_COL,
+)
+
+# The per-row CatBoost weight column (log(1 + n_ratings_in_train), train-fold).
+SAMPLE_WEIGHT_COL = "sample_weight"
+# Grouping key for the early-stopping validation fold — split by wine, never
+# by row, to mirror the train/test boundary and avoid leakage.
+GROUP_KEY_COL = "wine_id"
+
+# Categorical features handed to CatBoost via `cat_features`. CatBoost rejects
+# NaN in categoricals, so `models/dataset.py` fills nulls with a sentinel and
+# casts high-cardinality integer keys (winery_id) to string first.
+CATEGORICAL_FEATURE_COLS: tuple[str, ...] = (
+    "wine_type",
+    "country",
+    "region_name",
+    "winery_id",
+    "grape_majority",
+    "drainage_class",
+    "body_label",
+    "acidity_label",
+)
+CATEGORICAL_NULL_SENTINEL = "unknown"
+
+# Boolean features cast to Int8 0/1 and treated as numerical (CatBoost handles
+# NaN in numerics natively, so a missing region's flags stay null).
+BOOL_FEATURE_COLS: tuple[str, ...] = ("is_partial", "calcareous")
+
+# Quantile heads for the rating model → the recommender's _lo / _hi bands.
+RATING_QUANTILES: tuple[float, float] = (0.1, 0.9)
+
+# Fraction of TRAIN wines carved out (by wine_id) for early-stopping eval.
+GROUP_VAL_FRAC = 0.1
+# Seed for the grouped validation shuffle and CatBoost's RNG. Fix once.
+MODEL_SEED = 42
+
+# MLflow experiment name; the tracking store is the gitignored repo-root
+# `mlruns/` directory (see Settings.mlflow_tracking_dir).
+MLFLOW_EXPERIMENT = "vininator"
+MLFLOW_RUNS_DIRNAME = "mlruns"
+
+# Saved model bundle stems under data/models/ (one `.cbm` + one `.meta.json`
+# each). The recommender (Phase 6) loads these by name.
+MODELS_DIRNAME = "models"
+RATING_BUNDLE = "rating"
+RATING_QUANTILE_LO_BUNDLE = "rating_q_lo"
+RATING_QUANTILE_HI_BUNDLE = "rating_q_hi"
+BODY_BUNDLE = "body"
+ACIDITY_BUNDLE = "acidity"
+HARMONIZE_BUNDLE = "harmonize"
+
 
 def _project_root() -> Path:
     """Walk up from this file until we find the repo's `pyproject.toml`.
@@ -444,6 +555,30 @@ class Settings(BaseSettings):
         """Future-vintage holdout (vintage 2019–2021, any WineID)."""
         return self.processed_dir / PROCESSED_FUTURE_VINTAGE_TEST_PARQUET
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def models_dir(self) -> Path:
+        """Trained model bundles (`.cbm` + `.meta.json`). Gitignored via data/."""
+        return self.data_dir / MODELS_DIRNAME
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def snapshots_dir(self) -> Path:
+        """CatBoost training snapshots for crash recovery. Deleted on successful save."""
+        return self.data_dir / "snapshots"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mlflow_tracking_dir(self) -> Path:
+        """Local MLflow file store at the repo root (gitignored as `mlruns/`)."""
+        return _project_root() / MLFLOW_RUNS_DIRNAME
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mlflow_tracking_uri(self) -> str:
+        """`file://` URI MLflow expects for a local store."""
+        return self.mlflow_tracking_dir.as_uri()
+
     def ensure_dirs(self) -> None:
         """Create the data layout if missing. Idempotent."""
         for d in (
@@ -453,6 +588,8 @@ class Settings(BaseSettings):
             self.soil_raw_dir,
             self.dem_raw_dir,
             self.nasa_power_raw_dir,
+            self.models_dir,
+            self.snapshots_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

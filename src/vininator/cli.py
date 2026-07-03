@@ -1,13 +1,14 @@
 """Typer CLI entrypoint.
 
 `vininator` is the single orchestration surface — phases (`data`, `features`,
-`train`, `eval`, `api`) hang off subcommand groups. Phase 1 ships the `data`
-group; later phases add their own without touching this file's structure.
+`train`, and later `recommend`) hang off subcommand groups, each added without
+touching this file's structure.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import polars as pl
 import typer
@@ -23,6 +24,9 @@ from vininator.features.build import build_processed_tables
 from vininator.features.climate import build_climate_table
 from vininator.features.soil import build_soil_table
 from vininator.features.terroir import build_terroir_table
+from vininator.models.harmonize import HarmonizeReport, train_harmonize
+from vininator.models.profile import ProfileReport, train_profile
+from vininator.models.rating import RatingReport, train_rating
 
 app = typer.Typer(
     name="vininator",
@@ -33,10 +37,13 @@ app = typer.Typer(
 data_app = typer.Typer(help="Dataset acquisition and inspection.", no_args_is_help=True)
 app.add_typer(data_app, name="data")
 
-features_app = typer.Typer(
-    help="Feature engineering and terroir pipeline.", no_args_is_help=True
-)
+features_app = typer.Typer(help="Feature engineering and terroir pipeline.", no_args_is_help=True)
 app.add_typer(features_app, name="features")
+
+train_app = typer.Typer(
+    help="Train the rating, profile, and harmonize models.", no_args_is_help=True
+)
+app.add_typer(train_app, name="train")
 
 
 @data_app.command("download")
@@ -80,9 +87,7 @@ def features_geocode(
         pct = 100.0 * done / total if total else 100.0
         typer.echo(f"... geocoded {done}/{total} ({pct:.1f}%)")
 
-    path = geocode_regions(
-        force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo
-    )
+    path = geocode_regions(force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo)
     typer.echo(f"Geocode cache: {path}")
 
 
@@ -138,17 +143,13 @@ def features_soil(
         pct = 100.0 * done / total if total else 100.0
         typer.echo(f"... soil {done}/{total} ({pct:.1f}%)")
 
-    path = build_soil_table(
-        force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo
-    )
+    path = build_soil_table(force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo)
     typer.echo(f"Soil table: {path}")
 
 
 @features_app.command("climate")
 def features_climate(
-    force: bool = typer.Option(
-        False, "--force", help="Re-fetch every JSON and rebuild every row."
-    ),
+    force: bool = typer.Option(False, "--force", help="Re-fetch every JSON and rebuild every row."),
     limit: int | None = typer.Option(
         None, "--limit", help="Process at most N regions this run (resumable)."
     ),
@@ -166,16 +167,16 @@ def features_climate(
         pct = 100.0 * done / total if total else 100.0
         typer.echo(f"... climate {done}/{total} ({pct:.1f}%)")
 
-    path = build_climate_table(
-        force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo
-    )
+    path = build_climate_table(force=force, limit=limit, progress_fn=progress, notify_fn=typer.echo)
     typer.echo(f"Climate table: {path}")
 
 
 @features_app.command("terroir")
 def features_terroir(
     force: bool = typer.Option(
-        False, "--force", help="Rebuild from current inputs (the build always rebuilds; flag is accepted for CLI symmetry)."
+        False,
+        "--force",
+        help="Rebuild from current inputs (the build always rebuilds; flag is accepted for CLI symmetry).",
     ),
 ) -> None:
     """Join climate.parquet ⨝ soil.parquet → terroir.parquet.
@@ -220,6 +221,130 @@ def features_build(
     typer.echo(f"grape vocab size:          {report.grape_vocab_size:>12,}")
     typer.echo(f"harmonize vocab size:      {report.harmonize_vocab_size:>12,}")
     typer.echo(f"output columns:            {report.output_columns:>12,}")
+
+
+def _print_rating_report(report: RatingReport) -> None:
+    typer.echo(f"features: {report.n_features}   train cells: {report.n_train:,}")
+    for m in report.eval_metrics:
+        typer.echo(
+            f"[{m.split}] per-rating (noise floor {m.noise_floor:.4f} — "
+            "even a perfect model cannot beat it)"
+        )
+        typer.echo(f"[{m.split}]   {'model':18s} RMSE={m.rmse:.4f}  MAE={m.mae:.4f}")
+        for b in report.baselines.get(m.split, []):
+            typer.echo(f"[{m.split}]   {b.name:18s} RMSE={b.rmse:.4f}  MAE={b.mae:.4f}")
+        typer.echo(f"[{m.split}] cell-level (headline: mean rating per wine/vintage/age)")
+        typer.echo(f"[{m.split}]   {'model':18s} RMSE={m.cell_rmse:.4f}  MAE={m.cell_mae:.4f}")
+        for b in report.cell_baselines.get(m.split, []):
+            typer.echo(f"[{m.split}]   {b.name:18s} RMSE={b.rmse:.4f}  MAE={b.mae:.4f}")
+    typer.echo("bundles: " + ", ".join(report.bundle_names))
+
+
+def _print_profile_report(report: ProfileReport) -> None:
+    typer.echo(f"features: {report.n_features}")
+    for m in report.metrics:
+        typer.echo(
+            f"[{m.split}] {m.target:14s} accuracy={m.accuracy:.4f}  macro_f1={m.macro_f1:.4f}"
+        )
+    typer.echo("bundles: " + ", ".join(report.bundle_names))
+
+
+def _print_harmonize_report(report: HarmonizeReport) -> None:
+    typer.echo(f"features: {report.n_features}  labels: {report.n_labels}")
+    for sm in report.metrics:
+        typer.echo(f"[{sm.split}] mean_f1={sm.mean_f1:.4f}  hamming={sm.hamming:.4f}")
+        ranked = sorted(sm.per_label_f1.items(), key=lambda kv: kv[1], reverse=True)
+        for label, f1 in ranked[:5]:
+            typer.echo(f"  {label:22s} F1={f1:.4f}")
+    typer.echo("bundles: " + ", ".join(report.bundle_names))
+
+
+@train_app.command("rating")
+def train_rating_cmd(
+    config: Path = typer.Option("configs/rating_v1.yaml", "--config", help="Experiment yaml."),
+    force: bool = typer.Option(False, "--force", help="Retrain even if bundles exist."),
+    sample_frac: float | None = typer.Option(
+        None, "--sample-frac", help="Subsample wines for a fast smoke run (e.g. 0.01)."
+    ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log the run to MLflow."),
+) -> None:
+    """Train the CatBoost rating regressor + quantile heads, report vs baselines."""
+    report = train_rating(
+        config, force=force, sample_frac=sample_frac, track=track, notify_fn=typer.echo
+    )
+    _print_rating_report(report)
+
+
+@train_app.command("profile")
+def train_profile_cmd(
+    config: Path = typer.Option("configs/profile_v1.yaml", "--config", help="Experiment yaml."),
+    force: bool = typer.Option(False, "--force", help="Retrain even if bundles exist."),
+    sample_frac: float | None = typer.Option(
+        None, "--sample-frac", help="Subsample wines for a fast smoke run (e.g. 0.01)."
+    ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log the run to MLflow."),
+) -> None:
+    """Train the Body and Acidity classifiers, report accuracy + macro-F1."""
+    report = train_profile(
+        config, force=force, sample_frac=sample_frac, track=track, notify_fn=typer.echo
+    )
+    _print_profile_report(report)
+
+
+@train_app.command("harmonize")
+def train_harmonize_cmd(
+    config: Path = typer.Option("configs/harmonize_v1.yaml", "--config", help="Experiment yaml."),
+    force: bool = typer.Option(False, "--force", help="Retrain even if bundles exist."),
+    sample_frac: float | None = typer.Option(
+        None, "--sample-frac", help="Subsample wines for a fast smoke run (e.g. 0.01)."
+    ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log the run to MLflow."),
+) -> None:
+    """Train the multilabel food-pairing model, report per-label F1 + Hamming."""
+    report = train_harmonize(
+        config, force=force, sample_frac=sample_frac, track=track, notify_fn=typer.echo
+    )
+    _print_harmonize_report(report)
+
+
+@train_app.command("all")
+def train_all_cmd(
+    sample_frac: float | None = typer.Option(
+        None, "--sample-frac", help="Subsample wines for a fast smoke run (e.g. 0.01)."
+    ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log the runs to MLflow."),
+    configs_dir: Path = typer.Option(
+        "configs", "--configs-dir", help="Directory holding the *_v1.yaml configs."
+    ),
+) -> None:
+    """Run rating, profile, and harmonize training in sequence (default configs)."""
+    typer.echo("=== rating ===")
+    _print_rating_report(
+        train_rating(
+            configs_dir / "rating_v1.yaml",
+            sample_frac=sample_frac,
+            track=track,
+            notify_fn=typer.echo,
+        )
+    )
+    typer.echo("=== profile ===")
+    _print_profile_report(
+        train_profile(
+            configs_dir / "profile_v1.yaml",
+            sample_frac=sample_frac,
+            track=track,
+            notify_fn=typer.echo,
+        )
+    )
+    typer.echo("=== harmonize ===")
+    _print_harmonize_report(
+        train_harmonize(
+            configs_dir / "harmonize_v1.yaml",
+            sample_frac=sample_frac,
+            track=track,
+            notify_fn=typer.echo,
+        )
+    )
 
 
 if __name__ == "__main__":

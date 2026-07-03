@@ -8,7 +8,7 @@ A machine learning project that combines the [X-Wines](https://github.com/rogeri
 - **Profile** — body and acidity (X-Wines ships these as labels)
 - **Food-pairing profile** — multi-label prediction over the top-N Harmonize pairings (closest proxy to a tasting profile without review text)
 
-The project evaluates how much vintage-specific climate features and region-level soil composition contribute to predicting a wine's sensory profile beyond producer, region, grape, price, and `age_at_review`. The trained rating model then feeds a **drink-now / age-well recommender** that sweeps `age_at_review` over future opening years to surface monogrape wines best drunk this year — or worth cellaring for later. Findings are published in [RESULTS.md](./RESULTS.md).
+The project evaluates how much vintage-specific climate features and region-level soil composition contribute to predicting a wine's sensory profile beyond producer, region, grape, and `age_at_review`. The trained rating model then feeds a **drink-now / age-well recommender** that sweeps `age_at_review` over future opening years to surface monogrape wines best drunk this year — or worth cellaring for later. Findings are published in [RESULTS.md](./RESULTS.md).
 
 ---
 
@@ -75,6 +75,8 @@ uv run vininator features build
 uv run vininator train rating --config configs/rating_v1.yaml
 uv run vininator train profile --config configs/profile_v1.yaml
 uv run vininator train harmonize --config configs/harmonize_v1.yaml
+# Or you can run all of the above using
+# uv run vininator train all
 
 # 6. Measure each feature block's contribution by retraining with it dropped
 uv run vininator eval ablations

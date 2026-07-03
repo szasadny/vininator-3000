@@ -1,0 +1,16 @@
+# Fast smoke config for the multilabel food-pairing model. This is the slow one
+# at production settings (MultiLogloss over ~30 labels jointly), so the smoke
+# keeps iterations tiny. NOT a real run: 20 iterations, no early stopping.
+#   vininator train harmonize --config configs/harmonize_smoke.yaml --sample-frac 0.02 --no-track
+name: harmonize_smoke
+
+catboost_params:
+  iterations: 20
+  depth: 4
+  learning_rate: 0.3
+  task_type: CPU
+
+data:
+  sample_frac: null
+  max_rows: 50000
+  seed: 42

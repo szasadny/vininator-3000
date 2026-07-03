@@ -1,0 +1,27 @@
+# Body + Acidity multi-class classifiers (Phase 4 secondary targets).
+# `vininator train profile --config configs/profile_v1.yaml`
+# auto_class_weights=Balanced is forced in models/profile.py on top of these
+# params, since both labels are heavily skewed.
+#
+# Trains on the wine-vintage aggregated table (one row per wine × vintage,
+# ~21× smaller than the raw rating rows) — see models/dataset.py.
+name: profile_v1
+
+catboost_params:
+  iterations: 1000
+  depth: 8
+  learning_rate: 0.05
+  l2_leaf_reg: 3.0
+  od_type: Iter
+  od_wait: 100
+  task_type: CPU
+  # Same CPU speed knobs as rating_v1 — see the comments there.
+  max_ctr_complexity: 1
+  one_hot_max_size: 8
+  thread_count: 10
+  allow_writing_files: true  # enables crash snapshots, see rating_v1.yaml
+
+data:
+  sample_frac: null
+  max_rows: null
+  seed: 42

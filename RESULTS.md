@@ -8,7 +8,7 @@
 
 *To be filled by `scripts/build_results.py`.*
 
-One paragraph: did the terroir block (NASA POWER climate + SoilGrids soil) improve rating prediction over a producer + region + grape + price + `age_at_review` baseline, by how much (RMSE delta on the future-vintage split), and what's the honest takeaway. Reported even if the answer is "no meaningful improvement" — see [PROJECT.md §7](./PROJECT.md#7-realistic-things-to-know) on framing.
+One paragraph: did the terroir block (NASA POWER climate + SoilGrids soil) improve rating prediction over a producer + region + grape + `age_at_review` baseline, by how much (cell-level RMSE delta on the future-vintage split), and what's the honest takeaway. Reported even if the answer is "no meaningful improvement" — see [PROJECT.md §7](./PROJECT.md#7-realistic-things-to-know) on framing.
 
 ---
 
@@ -25,25 +25,29 @@ One paragraph: did the terroir block (NASA POWER climate + SoilGrids soil) impro
 
 ## 3. Rating model
 
+All rating tables report **two levels**: per-rating RMSE/MAE (comparable to the PROJECT.md baseline numbers, floored by the within-cell spread of user opinions — the `noise_floor` row) and **cell-level** weighted RMSE/MAE (predicted vs. observed mean rating per `(wine, vintage, age)` cell — the headline, where terroir deltas are visible instead of drowned in user noise).
+
 ### 3.1 Held-out wines (random `WineID` split)
 
-*Table: RMSE + MAE for the trained model and the five baselines from PROJECT.md Phase 4 — global mean, per-`WineryID` mean, per-`(WineID, Vintage)` mean (in-sample only), per-`(RegionName, Vintage)` mean, per-`(GrapeMajority, RegionName)` mean.*
+*Table: per-rating and cell-level RMSE + MAE for the trained model and the baseline grid — global mean, per-`WineryID` mean, per-`(RegionName, Vintage)` mean, per-`(GrapeMajority, RegionName)` mean — plus the `noise_floor` for the per-rating columns.*
 
 ### 3.2 Future-vintage holdout (train ≤ 2018, test 2019–2021)
 
-*Same metrics, on the harder split. This is the number that says whether the model learned terroir or memorized region averages.*
+*Same metrics, on the vintage-generalization split. Interpretation note (rendered with the table): this split contains wines seen in training — only the vintage is new — so its RMSE is expected to be lower than §3.1's and the two are **not** comparable to each other. §3.1 asks "does the model generalize to a new wine"; this section asks "does it generalize to a new year of a known wine" — the terroir question.*
 
 ### 3.3 Ablations
 
-*Table with rows = ablated block (none / − terroir / − producer / − price / − `age_at_review`) and columns = RMSE on each split, plus the delta against the full model.*
+*Table with rows = ablated block (none / − terroir / − producer / − `age_at_review`) and columns = cell-level RMSE on each split, plus the delta against the full model. RMSE head only (quantile heads don't affect the conclusion).*
 
 ### 3.4 Confidence intervals
 
-*Per-prediction lo / hi from the quantile heads, summarized as coverage on the held-out set.*
+*Per-prediction lo / hi from the quantile heads — bands on the wine-vintage mean rating, not on individual user ratings — summarized as coverage of observed cell means on the held-out set.*
 
 ---
 
 ## 4. Profile + Harmonize models
+
+All profile/harmonize metrics count each held-out **wine-vintage once** (not once per rating), matching how the models train — per-rating metrics would be dominated by popular wines.
 
 ### 4.1 Body
 
@@ -79,12 +83,25 @@ For each major grape, the top-N monogrape wines whose predicted-rating trajector
 
 *Tables per grape with columns: WineryName, WineName, RegionName, Vintage, predicted_peak_year, predicted_peak_rating, slope_to_peak. Rows where `age_at_review` had to be clipped to the training range are flagged.*
 
-### 6.3 Caveats
+### 6.3 Standout wines of the year (2026 → 2031)
+
+One curated shortlist per drinking year across the next five years — the wines the model predicts will be at their best *in that specific year*. Produced by `vininator recommend standout-years --from-year 2026 --to-year 2031`.
+
+*Six tables (2026, 2027, 2028, 2029, 2030, 2031), each top-10 monogrape, with columns: WineryName, WineName, RegionName, Vintage, predicted_rating, confidence band. A wine may appear in more than one year's list when its projected drink-now trajectory plateaus; that's expected and noted inline.*
+
+### 6.4 Overperformer outliers (more special than expected)
+
+Wines predicted to outscore their peer-group baseline (per-`(GrapeMajority, RegionName)` and per-`(RegionName, Vintage)` means, training-fold only) by the largest margin — and where the lower confidence bound still clears that baseline, so the surprise isn't an artefact of a wide prediction interval. These are the "punching above their weight" picks, deliberately *not* the highest absolute ratings (which skew to famous producers). Produced by `vininator recommend outliers --opening-year 2026`.
+
+*Table: WineryName, WineName, RegionName, Vintage, predicted_rating, peer_baseline, overperformance (= predicted − baseline), confidence band, sorted by overperformance descending. Short commentary on what the model thinks makes each outlier special — terroir-driven (a standout vintage in a modest region) vs. structure-driven — read off the SHAP contributions for the top few.*
+
+### 6.5 Caveats
 
 - Rankings are conditional on wines *in X-Wines*. Not a ranking of the entire wine world.
 - Producer effects dominate — expect lists to skew toward well-rated wineries. That's signal, not bug, but worth knowing.
 - Aged-wine projections beyond ~10 years post-vintage are extrapolation; clipped rows are flagged.
 - Climate is region-centroid, not vineyard-parcel. See the disclaimer block in the README for the full list of scoping decisions.
+- Overperformer outliers are only as trustworthy as the baseline they're measured against — sparse `(RegionName, Vintage)` cells make for noisy baselines, so the outlier table is restricted to peer groups with enough support (threshold set in config).
 
 ---
 

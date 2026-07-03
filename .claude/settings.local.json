@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "PowerShell($b = [System.IO.File]::ReadAllBytes\\(\"z:\\\\vininator-3000\\\\PROJECT.md\"\\); $s = [System.Text.Encoding]::UTF8.GetString\\($b\\); $crlf = \\([regex]::Matches\\($s, \"`r`n\"\\)\\).Count; $lf = \\([regex]::Matches\\($s, \"`n\"\\)\\).Count; $cr = \\([regex]::Matches\\($s, \"`r\"\\)\\).Count; Write-Output \"bytes=$\\($b.Length\\) crlf=$crlf totalLF=$lf totalCR=$cr loneLF=$\\($lf-$crlf\\) loneCR=$\\($cr-$crlf\\) maxByte=$\\(\\($b | Measure-Object -Maximum\\).Maximum\\)\")"
     ]
   }
 }
