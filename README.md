@@ -1,22 +1,24 @@
 # 🍷 Vininator 3000
 
-> Predict wine ratings, structure, and tasting characteristics from wine metadata and vintage-specific terroir conditions.
+> Drink now or cellar? Wine rankings from CatBoost models trained on 21M ratings, NASA satellite weather, and soil chemistry per vintage.
 
-A machine learning project that combines the [X-Wines](https://github.com/rogerioxavier/X-Wines) dataset with growing-season weather data from [NASA POWER](https://power.larc.nasa.gov/) (MERRA-2 + CERES SYN1DEG) and [SoilGrids](https://soilgrids.org/) soil and terrain data to predict:
+The goal is pretty simple: It's to find the best wines. Vininator trains rating models on the [X-Wines](https://github.com/rogerioxavier/X-Wines) dataset (100k wines, 21M ratings) and turns them into four rankings:
 
-- **Rating** — the 1–5 star score a wine is likely to receive
-- **Profile** — body and acidity (X-Wines ships these as labels)
-- **Food-pairing profile** — multi-label prediction over the top-N Harmonize pairings (closest proxy to a tasting profile without review text)
+- **Drink-now**: Which wines are predicted to be drinking best this year
+- **Age-well**: Which wines' predicted trajectory still rises: the ones worth cellaring
+- **Standouts per year**: For each drinking year 2026–2031, the bottles to open that year
+- **Overperformers**: Wines predicted to punch far above their region/grape/vintage peer group
 
-The project evaluates how much vintage-specific climate features and region-level soil composition contribute to predicting a wine's sensory profile beyond producer, region, grape, and `age_at_review`. The trained rating model then feeds a **drink-now / age-well recommender** that sweeps `age_at_review` over future opening years to surface monogrape wines best drunk this year — or worth cellaring for later. Findings are published in [RESULTS.md](./RESULTS.md).
+Under the hood: every rating in X-Wines is timestamped against its vintage, so `age_at_review` is a real model feature — sweeping it forward projects a wine's predicted rating to any future opening year. The feature set assumes terroir matters and encodes it properly: growing-season weather from [NASA POWER](https://power.larc.nasa.gov/) (MERRA-2 + CERES SYN1DEG) per `(region, vintage)` and [SoilGrids](https://soilgrids.org/) soil composition per region, next to grape, producer, and region. Supporting models predict body/acidity and food pairings to enrich the ranking tables. All rankings are published in [RESULTS.md](./RESULTS.md).
+
 
 ---
 
 ## Status
 
-🚧 **In development.** Phase 4. See [PROJECT.md](./PROJECT.md) for the full plan and current phase.
+In development, currently Phase 5. See [PROJECT.md](./PROJECT.md) for the full plan and current phase.
 
-This is a batch / CLI project — no hosted UI, no live API. The deliverable is the trained models, the ablation findings, and the drink-now / age-well recommendations published in [RESULTS.md](./RESULTS.md).
+This is a batch / CLI project — no hosted UI, no live API. The deliverable is the four ranking tables in [RESULTS.md](./RESULTS.md), backed by the trained models and the honest model-quality numbers that say how much to trust each list.
 
 ---
 
@@ -84,6 +86,8 @@ uv run vininator eval ablations
 # 7. Drink-now and age-well rankings (Phase 6)
 uv run vininator recommend drink-now --opening-year 2026 --grape pinot-noir --max-vintage-age 5
 uv run vininator recommend age-well  --opening-year 2026 --horizon 10 --grape nebbiolo
+uv run vininator recommend standout-years --from-year 2026 --to-year 2031
+uv run vininator recommend outliers --opening-year 2026
 
 # 8. Regenerate RESULTS.md + reports/figures from the trained artifacts
 uv run python scripts/build_results.py
@@ -99,7 +103,7 @@ src/vininator/
   features/     Climate (NASA POWER), soil & terrain (SoilGrids + DEM), terroir joiner, Harmonize parsing, feature assembly
   models/       CatBoost rating regressor (+ quantile heads), body / acidity classifiers, Harmonize multi-label
   eval/         Metrics, ablations, SHAP
-  recommend/    drink-now and age-well rankings by sweeping age_at_review
+  recommend/    the four rankings (drink-now, age-well, standout-years, outliers) by sweeping age_at_review
   cli.py        Typer CLI entrypoint
 
 scripts/         build_results.py — regenerates RESULTS.md + reports/figures from artifacts
@@ -116,7 +120,7 @@ Full structure and rationale: [PROJECT.md](./PROJECT.md). Working conventions: [
 
 ## Data
 
-**Primary dataset:** [X-Wines](https://github.com/rogerioxavier/X-Wines) (Xavier 2023, MDPI BDCC). The full variant covers **100,646 wines** and **21,013,536 ratings** from 2012–2021, spanning 62 wine-producing countries.
+**Primary dataset:** [X-Wines](https://github.com/rogerioxavier/X-Wines) (Xavier 2023, MDPI BDCC). The full variant covers 100,646 wines and 21,013,536 ratings from 2012–2021, spanning 62 wine-producing countries.
 
 Three variants are supported via the `VININATOR_XWINES_VARIANT` env var:
 
@@ -126,9 +130,9 @@ Three variants are supported via the `VININATOR_XWINES_VARIANT` env var:
 | `slim` | 1,007 | 150,000 | Google Drive (manual drop) |
 | `full` | 100,646 | 21,013,536 | Google Drive (manual drop) |
 
-Each rating ships with **`Date`** (ISO timestamp) plus the rated **`Vintage`**, so the loader derives a per-row **`age_at_review = year(Date) - Vintage`** during normalization.
+Each rating ships with `Date` (ISO timestamp) plus the rated `Vintage`, so the loader derives a per-row `age_at_review = year(Date) - Vintage` during normalization.
 
-**License:** **CC0 1.0** — public domain dedication. No usage restrictions.
+**License:** CC0 1.0 — public domain dedication. No usage restrictions.
 
 **Weather (Phase 2):** Daily climate from the [NASA POWER Daily API](https://power.larc.nasa.gov/docs/services/api/temporal/daily/) (`~0.5° / ~55 km`), serving MERRA-2 temperature/precipitation and CERES SYN1DEG solar radiation. Free, public-domain, no registration. One JSON per region cached under `data/raw/nasa_power/`.
 
@@ -139,24 +143,25 @@ Each rating ships with **`Date`** (ISO timestamp) plus the rated **`Vintage`**, 
 ## Key design choices
 
 - **Split by `WineID`, not by rating.** Same wine in train and test is leakage.
-- **Future-vintage holdout** (train ≤ 2018, test 2019–2021) tests whether the model genuinely learned terroir vs. memorized region averages.
-- **`age_at_review`** is a real per-row feature, derived from `Date` and `Vintage` at load time.
+- **Future-vintage holdout** (train ≤ 2018, test 2019–2021) tests whether the model genuinely learned vintage-specific signal vs. memorized region averages.
+- **`age_at_review` is the recommender's lever.** A real per-row feature (derived from `Date` and `Vintage`); sweeping it against the trained rating model projects predicted ratings forward to any opening year, which is how all four rankings are produced.
 - **Producer (`WineryID`) aggregates computed on training fold only.** Standard target-leakage prevention.
 - **CatBoost over manual encoding.** High-cardinality categoricals (`WineryID`, `RegionName`) handled natively.
-
-- **`age_at_review` is the recommender's lever.** Sweeping `age_at_review` against the trained rating model projects predicted ratings forward to any opening year, which is how the drink-now and age-well rankings are produced.
+- **Training happens on aggregated feature cells, not raw rating rows.** Rows sharing `(wine, vintage, age)` have identical features, so collapsing them is loss-exact for RMSE while shrinking the full variant ~7× — the difference between fitting in 16 GB of RAM and OOM.
 
 ---
 
 ## Evaluation
 
-- **Rating:** RMSE + MAE on held-out wines and on the future-vintage split.
-- **Profile:** per-attribute accuracy and macro-F1 against the X-Wines Body / Acidity labels.
-- **Harmonize food pairings:** per-label F1 + Hamming loss on held-out wines.
-- **Ablations:** drop terroir, drop producer, drop `age_at_review` — quantify each block's marginal contribution.
+The rankings are only as good as the models behind them, so model quality is measured and published alongside every list:
+
+- **Rating:** RMSE + MAE at two levels — per-rating (against leakage-safe baselines and the ~0.64 noise floor of user disagreement) and per wine-vintage cell (the headline: predicted vs. observed mean rating, where ranking quality actually lives). Quantile heads provide the confidence bands the rankings use to drop shaky picks.
+- **Profile:** per-attribute accuracy and macro-F1 against the X-Wines Body / Acidity labels, per held-out wine-vintage.
+- **Harmonize food pairings:** per-label F1 + Hamming loss on held-out wine-vintages.
+- **Ablations (diagnostic):** drop terroir, drop producer, drop `age_at_review` — quantify what each block actually contributes. Terroir is an assumption baked into the feature set; the ablation reports honestly how much it earns its place.
 - **SHAP** on the rating model to understand what's actually doing the work.
 
-All metrics, ablation tables, SHAP plots, and drink-now / age-well recommendation tables are published in [RESULTS.md](./RESULTS.md).
+All metrics, ablation tables, SHAP plots, and the four ranking tables are published in [RESULTS.md](./RESULTS.md).
 
 ---
 
@@ -168,7 +173,7 @@ This is a personal hobby / learning research project. The list below captures th
 - **One grid cell per region.** NASA POWER returns the nearest 0.5° (~55 km) cell to the region's centroid. Large appellations (Bordeaux, Napa) collapse to a single point that may not represent the regional average growing conditions.
 - **Soil is topsoil only (0–30 cm).** SoilGrids has deeper layers; we average its three topsoil bands (0–5 cm, 5–15 cm, 15–30 cm) and ignore everything below. Vine roots reach much deeper, but topsoil correlates with the variation we care about.
 - **Reviews from X-Wines are subjective.** Each review carries equal weight regardless of who wrote it — no distinction between an amateur and a sommelier. A serious study would weight reviews by reviewer track record or expertise.
-- **Geocode `result_type` blacklist.** Nominatim returns wildly inconsistent OSM entity types for wine regions — appellations come back tagged as `restaurant`, `volcano`, `peak`, `river`, etc. A whitelist would drop hundreds of real wine regions. We blacklist only obvious junk (`bus_stop`, `bank`, `school`, `fuel`, ...) and accept that a handful of real regions get caught: **Yakima Valley** tagged `college`, **Patagonia** tagged `atm`, **Serra Gaúcha** tagged `fuel`. ~3 % of the 1,422 geocoded regions drop out as collateral.
+- **Geocode `result_type` blacklist.** Nominatim returns wildly inconsistent OSM entity types for wine regions — appellations come back tagged as `restaurant`, `volcano`, `peak`, `river`, etc. A whitelist would drop hundreds of real wine regions. We blacklist only obvious junk (`bus_stop`, `bank`, `school`, `fuel`, ...) and accept that a handful of real regions get caught: Yakima Valley tagged `college`, Patagonia tagged `atm`, Serra Gaúcha tagged `fuel`. ~3 % of the 1,422 geocoded regions drop out as collateral.
 - **Some city centroids slip through.** Region strings like "Buenos Aires, Argentina" resolve to the city center via Nominatim, not the wine-growing area outside. The coordinates pass `status='ok'` but the soil pull then returns null over the urban grid. Downstream CatBoost handles the nulls; the rows aren't dropped.
 - **One point per region, not per vineyard.** A wine from "Bordeaux" gets the climate + soil of the Bordeaux centroid even if it actually came from a south-facing slope in Saint-Émilion. A serious terroir model would work at parcel level.
 - **`calcareous` is approximated via pH.** SoilGrids doesn't expose CaCO₃ directly. We flag soils as calcareous when `ph_h2o ≥ 7.5`, which catches the high-pH soils that limestone bedrock produces (Champagne, Chablis, Jerez) but isn't a literal carbonate measurement.

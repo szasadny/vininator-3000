@@ -2,7 +2,7 @@
 
 ## Domain
 
-ML project that predicts wine ratings, structured profile (body/acidity), and food-pairing vectors from grape, region, vintage, producer, and `age_at_review` — augmented with a **terroir feature block** that combines NASA POWER daily climate (MERRA-2 + CERES SYN1DEG) per `(region, vintage_year)` with SoilGrids soil/terrain properties per `region`. A recommender sweeps `age_at_review` over opening years to produce drink-now / age-well / standout-year / overperformer rankings.
+A wine recommender: the goal is to find the best wines in the X-Wines dataset — drink-now, age-well, standout-per-year, and overperformer-outlier rankings, produced by sweeping `age_at_review` against a trained CatBoost rating model. The machinery: rating regression (+ quantile bands) over grape, region, vintage, producer, and `age_at_review`, augmented with a **terroir feature block** (NASA POWER daily climate per `(region, vintage_year)` + SoilGrids soil/terrain per `region`); supporting body/acidity and food-pairing models enrich the ranking tables. Terroir mattering is a working assumption of the feature design, not the research question — its actual contribution is audited via ablation and reported honestly.
 
 Primary dataset: **X-Wines** (`rogerioxavier/X-Wines` on GitHub, CC0 1.0). Full variant: ~100k wines / 21M ratings, every rating timestamped with its rated vintage — which is what makes `age_at_review` a real per-row feature. No review text, no images: all targets are structured labels.
 
@@ -85,7 +85,7 @@ These are the rules that protect the *headline result*. They are non-negotiable.
 - **Cache every external call.** NASA POWER, SoilGrids, and Nominatim are all rate-limited and intermittently fail. Every external fetch goes through a function that checks a parquet/sqlite/json cache first, writes the result atomically, and is resumable across restarts.
 - **Raw data is immutable.** Files in `data/raw/` are never modified after write. Cleaning and joining happen on the way to `data/interim/` and `data/processed/`.
 - **Track every experiment.** MLflow/W&B from run #1. Hyperparameters, dataset hash, git SHA, metrics, feature list — all logged. "I'll start tracking once it works" never happens.
-- **Report ablations honestly.** The headline experiment compares rating-with-terroir vs. rating-without. If terroir adds 1% RMSE, that's the result — don't bury it.
+- **Report ablations honestly.** Terroir is an assumption in the feature design, not the thesis — but its contribution is still measured (rating-with-terroir vs. without, cell-level). If terroir adds 1% RMSE, that's the number that goes in RESULTS.md — don't bury it, don't inflate it.
 - **Sample weighting.** Use `log(1 + n_ratings)` per wine (summed per cell after aggregation). A wine with 5000 ratings is a different signal than a wine with 5.
 - **The recommender never re-engineers features.** Phase 6 scores only wines already in X-Wines by sweeping `age_at_review`; vintage (and therefore terroir) is held constant, so there is no live terroir fetch and no inference path to the upstream APIs.
 
