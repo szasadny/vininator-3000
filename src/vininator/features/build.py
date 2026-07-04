@@ -7,8 +7,15 @@ future-vintage holdout regardless of WineID.
 
 Leakage rules enforced here — not just documented:
   1. Producer aggregates (mean_rating, rating_std, n_reviews) are computed on
-     the train split only, then left-joined onto all three splits. Wineries
-     unseen in train get null — CatBoost handles that natively.
+     the train split only AND leave-one-wine-out: a wine's own ratings never
+     enter its producer features. Without the exclusion, a train wine at a
+     small winery sees a near-copy of its own label in producer_mean_rating —
+     the Phase 5 audit caught the model losing to the plain winery baseline
+     on held-out wines (test cell RMSE 0.457 vs 0.398) because early stopping
+     optimised for that leak. For test / future-vintage wines the exclusion is
+     a no-op (their ratings are not in the train fold), so LOO makes train
+     semantics match test instead of changing what test sees. Wineries with
+     no *other* train ratings get null — CatBoost handles that natively.
   2. Vocabulary for the Harmonize multi-hot (top-30 food pairings) and the
      Grapes multi-hot (top-50 varieties) is built from the train split only,
      then applied to all splits. Unseen entries → all-zero row.
@@ -40,6 +47,7 @@ import polars as pl
 
 from vininator.config import (
     FUTURE_VINTAGE_HOLDOUT,
+    PRODUCER_FEATURE_COLS,
     TOP_K_GRAPES,
     TOP_K_HARMONIZE,
     TRAIN_HOLDOUT_FRAC,
@@ -47,7 +55,7 @@ from vininator.config import (
     get_settings,
 )
 from vininator.data.load import scan_xwines_ratings, scan_xwines_wines
-from vininator.features.terroir import TERROIR_SCHEMA, scan_terroir
+from vininator.features.terroir import scan_terroir, terroir_feature_cols
 from vininator.features.text import (
     _slugify,
     build_grape_vocab,
@@ -60,13 +68,9 @@ from vininator.features.text import (
 NotifyFn = Callable[[str], None]
 
 
-# Terroir columns to carry into the processed table. Drop QA-only metadata and
-# join-key geography columns.
-_TERROIR_FEATURE_COLS: list[str] = [
-    c for c in TERROIR_SCHEMA
-    if not any(c.endswith(s) for s in ("_status", "_error", "_fetched_at"))
-    and c not in ("region", "country", "lat", "lon", "vintage_year")
-]
+# Terroir columns to carry into the processed table (single-sourced from
+# TERROIR_SCHEMA so the Phase 5 ablation's "terroir block" stays in lockstep).
+_TERROIR_FEATURE_COLS: list[str] = terroir_feature_cols()
 
 _PREFIX_COLS: list[str] = [
     "rating_id",
@@ -87,9 +91,7 @@ _PREFIX_COLS: list[str] = [
 
 _SUFFIX_COLS: list[str] = [
     *_TERROIR_FEATURE_COLS,
-    "producer_mean_rating",
-    "producer_rating_std",
-    "producer_n_reviews",
+    *PRODUCER_FEATURE_COLS,
     "body_label",
     "acidity_label",
 ]
@@ -159,7 +161,7 @@ def build_processed_tables(
     wine_features = _attach_wine_multihot(wines_lf, grape_vocab, harmonize_vocab)
 
     # --- Stage 5: train-only producer aggs and weight counts ---
-    _notify(notify_fn, "... computing producer aggregates (train fold)")
+    _notify(notify_fn, "... computing producer aggregates (train fold, leave-one-wine-out)")
     producer_aggs = _compute_producer_aggs(ratings_lf, wines_lf, test_wine_ids)
     _notify(notify_fn, "... computing sample weights (train fold)")
     wine_weights = _compute_wine_weights(ratings_lf, test_wine_ids)
@@ -356,29 +358,65 @@ def _compute_producer_aggs(
     wines_lf: pl.LazyFrame,
     test_wine_ids: pl.Series,
 ) -> pl.DataFrame:
-    """Train-fold-only producer aggregates by winery_id.
+    """Train-fold, leave-one-wine-out producer aggregates, keyed by wine_id.
 
-    Operates on a 2-col ratings projection joined to a 2-col wines projection
-    — both sides are minimal so the lazy plan finishes in a single streaming
-    pass over the train ratings.
+    One row per wine in the wines table: mean / sample-std / count of the
+    winery's train-fold ratings *excluding the wine's own*. Computed from
+    per-wine sufficient statistics (sum, sum of squares, count) so the LOO
+    values fall out of one subtraction per wine instead of a per-wine
+    re-aggregation; the streamed pass over the train ratings stays single.
+
+    Why LOO and not a plain per-winery mean: a train wine's own ratings inside
+    its winery mean are target leakage (worst at small wineries, where the
+    "feature" converges on the label), and the early-stopping fold is carved
+    from train, so the leak also picked the stopping point. Test-fold wines
+    contribute no train ratings, so their LOO value *is* the plain train-fold
+    winery aggregate — semantics now agree across splits. Wines whose winery
+    has no other train-fold ratings get null in all three columns.
     """
     fv_lo, _ = FUTURE_VINTAGE_HOLDOUT
     test_set = test_wine_ids.implode()
-    return (
+    per_wine = (
         ratings_lf
         .filter(pl.col("vintage_year") < fv_lo)
         .filter(~pl.col("wine_id").is_in(test_set))
-        .select("wine_id", "rating")
-        .join(
-            wines_lf.select("wine_id", "winery_id"),
-            on="wine_id",
-            how="inner",
-        )
-        .group_by("winery_id")
+        .group_by("wine_id")
         .agg(
-            pl.col("rating").mean().alias("producer_mean_rating"),
-            pl.col("rating").std().alias("producer_rating_std"),
-            pl.len().alias("producer_n_reviews"),
+            pl.col("rating").sum().alias("_sum"),
+            pl.col("rating").pow(2).sum().alias("_sumsq"),
+            pl.len().cast(pl.Int64).alias("_n"),
+        )
+    )
+    by_wine = (
+        wines_lf.select("wine_id", "winery_id")
+        .join(per_wine, on="wine_id", how="left")
+        .with_columns(
+            pl.col("_sum").fill_null(0.0),
+            pl.col("_sumsq").fill_null(0.0),
+            pl.col("_n").fill_null(0),
+        )
+    )
+    winery_totals = by_wine.group_by("winery_id").agg(
+        pl.col("_sum").sum().alias("_tot_sum"),
+        pl.col("_sumsq").sum().alias("_tot_sumsq"),
+        pl.col("_n").sum().alias("_tot_n"),
+    )
+    n_other = pl.col("_tot_n") - pl.col("_n")
+    sum_other = pl.col("_tot_sum") - pl.col("_sum")
+    sumsq_other = pl.col("_tot_sumsq") - pl.col("_sumsq")
+    mean_other = sum_other / n_other
+    # Sample variance from sufficient statistics; clip guards the tiny negative
+    # values float cancellation can produce when the true variance is ~0.
+    var_other = (sumsq_other - sum_other.pow(2) / n_other) / (n_other - 1)
+    return (
+        by_wine.join(winery_totals, on="winery_id", how="left")
+        .select(
+            "wine_id",
+            pl.when(n_other > 0).then(mean_other).alias("producer_mean_rating"),
+            pl.when(n_other > 1)
+            .then(var_other.clip(lower_bound=0.0).sqrt())
+            .alias("producer_rating_std"),
+            pl.when(n_other > 0).then(n_other).alias("producer_n_reviews"),
         )
         .collect()
     )
@@ -440,7 +478,7 @@ def _stream_split(
 
     Each split runs its own join independently — but the probe side of every
     hash join is a tiny in-memory frame (wine_features ~100k, terroir ~2k,
-    producer_aggs ~50k, wine_weights ~85k), so the only thing streamed is the
+    producer_aggs ~100k, wine_weights ~85k), so the only thing streamed is the
     21M-row ratings scan. Polars handles the join in Rust without
     materialising the joined frame.
     """
@@ -457,7 +495,7 @@ def _stream_split(
             right_on=["region", "country", "vintage_year"],
             how="left",
         )
-        .join(producer_aggs.lazy(), on="winery_id", how="left")
+        .join(producer_aggs.lazy(), on="wine_id", how="left")
         .join(wine_weights.lazy(), on="wine_id", how="left")
     )
 

@@ -359,6 +359,71 @@ def test_producer_agg_leakage_canary(tmp_data_dir: Path) -> None:
         )
 
 
+def test_producer_agg_leave_one_wine_out(tmp_data_dir: Path) -> None:
+    """A train wine's producer features exclude its own ratings.
+
+    The invariant (seed-independent, checked against the train parquet itself,
+    whose rows are exactly the aggregation base): for every train wine,
+    `producer_mean_rating` equals the mean rating of the OTHER train rows of
+    its winery — never the winery mean including itself. A sole-wine winery
+    gets null. This is the regression test for the Phase 5 leakage finding:
+    self-inclusion made the feature a near-copy of the label at small
+    wineries and the model lost to the plain winery baseline on held-out
+    wines.
+    """
+    # Winery 1: three wines with deliberately spread ratings so the LOO mean
+    # differs from the full winery mean for every wine. Winery 99: one wine
+    # only → its train row must get null producer features under LOO.
+    _write_wines([
+        _wine(1, winery_id=1),
+        _wine(2, winery_id=1),
+        _wine(3, winery_id=1),
+        _wine(4, winery_id=99),
+    ])
+    _write_ratings([
+        _rating(1, 1, 2015, 1.0),
+        _rating(2, 1, 2016, 2.0),
+        _rating(3, 2, 2015, 3.0),
+        _rating(4, 3, 2016, 5.0),
+        _rating(5, 4, 2015, 4.0),
+    ])
+    _write_terroir([
+        _terroir_row("Bordeaux", "France", 2015),
+        _terroir_row("Bordeaux", "France", 2016),
+    ])
+    build_processed_tables(force=True)
+    settings = get_settings()
+
+    train = pl.read_parquet(settings.processed_train_parquet)
+    for wine_id in train["wine_id"].unique().to_list():
+        wine_rows = train.filter(pl.col("wine_id") == wine_id)
+        winery_id = wine_rows["winery_id"][0]
+        others = train.filter(
+            (pl.col("winery_id") == winery_id) & (pl.col("wine_id") != wine_id)
+        )
+        got_mean = wine_rows["producer_mean_rating"][0]
+        got_n = wine_rows["producer_n_reviews"][0]
+        if others.is_empty():
+            assert got_mean is None, (
+                f"Wine {wine_id}: sole train wine of winery {winery_id} must get null "
+                f"producer_mean_rating, got {got_mean} — own ratings leaked in"
+            )
+            assert got_n is None
+        else:
+            expected = others["rating"].mean()
+            assert got_mean == pytest.approx(expected, rel=1e-9), (
+                f"Wine {wine_id}: producer_mean_rating={got_mean} but the "
+                f"leave-one-out winery mean is {expected} — own ratings leaked in"
+            )
+            assert got_n == others.height
+            expected_std = others["rating"].std()
+            got_std = wine_rows["producer_rating_std"][0]
+            if others.height > 1:
+                assert got_std == pytest.approx(expected_std, rel=1e-9)
+            else:
+                assert got_std is None
+
+
 # ---------------------------------------------------------------------------
 # Schema parity
 # ---------------------------------------------------------------------------

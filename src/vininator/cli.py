@@ -20,6 +20,9 @@ from vininator.data.geocode import (
     scan_geocode,
 )
 from vininator.data.load import download_xwines, xwines_info
+from vininator.eval.ablations import run_ablations
+from vininator.eval.importance import run_shap_analysis
+from vininator.eval.sanity import sanity_check
 from vininator.features.build import build_processed_tables
 from vininator.features.climate import build_climate_table
 from vininator.features.soil import build_soil_table
@@ -44,6 +47,12 @@ train_app = typer.Typer(
     help="Train the rating, profile, and harmonize models.", no_args_is_help=True
 )
 app.add_typer(train_app, name="train")
+
+eval_app = typer.Typer(
+    help="Phase 5 evaluation: ablations, SHAP, qualitative sanity checks.",
+    no_args_is_help=True,
+)
+app.add_typer(eval_app, name="eval")
 
 
 @data_app.command("download")
@@ -345,6 +354,104 @@ def train_all_cmd(
             notify_fn=typer.echo,
         )
     )
+
+
+@eval_app.command("ablations")
+def eval_ablations_cmd(
+    config: Path = typer.Option("configs/rating_v1.yaml", "--config", help="Experiment yaml."),
+    arm: list[str] | None = typer.Option(
+        None,
+        "--arm",
+        help="Run only these arms (repeatable). Default: all, `full` first.",
+    ),
+    sample_frac: float | None = typer.Option(
+        None, "--sample-frac", help="Subsample wines for a fast smoke run (e.g. 0.01)."
+    ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log each arm to MLflow."),
+) -> None:
+    """Retrain the rating RMSE head per feature-block ablation arm.
+
+    Arms: full (reference), no_terroir, no_producer, no_age. Every arm trains
+    with the same config, data, and early-stopping fold, so the cell-level
+    RMSE deltas are attributable to the dropped block. Expect roughly one
+    RMSE-head training per arm — plan for hours on the full variant.
+    """
+    report = run_ablations(
+        config, arms=arm or None, sample_frac=sample_frac, track=track, notify_fn=typer.echo
+    )
+    full = next((r for r in report.results if r.arm == "full"), None)
+    for r in report.results:
+        for m in r.metrics:
+            delta = ""
+            if full is not None and r.arm != "full":
+                ref = next((fm for fm in full.metrics if fm.split == m.split), None)
+                if ref is not None:
+                    delta = f"  delta_cell_rmse={m.cell_rmse - ref.cell_rmse:+.4f}"
+            typer.echo(
+                f"[{m.split}] {r.arm:12s} cell_rmse={m.cell_rmse:.4f}  "
+                f"cell_mae={m.cell_mae:.4f}  rmse={m.rmse:.4f}{delta}"
+            )
+    typer.echo(f"grid: {report.parquet_path}")
+
+
+@eval_app.command("shap")
+def eval_shap_cmd(
+    split: str = typer.Option("test", "--split", help="test | future_vintage_test"),
+    sample_cells: int | None = typer.Option(
+        None,
+        "--sample-cells",
+        help="Cells sampled for the SHAP computation (default from config).",
+    ),
+) -> None:
+    """Mean-|SHAP| ranking + terroir dependence plots for the rating model."""
+    report = run_shap_analysis(
+        split=split,  # type: ignore[arg-type]
+        sample_cells=sample_cells,
+        notify_fn=typer.echo,
+    )
+    typer.echo(f"top features by mean |SHAP| ({report.n_cells:,} {report.split} cells):")
+    for name, value in report.top_features:
+        typer.echo(f"  {name:28s} {value:.4f}")
+    typer.echo("block totals (sum of mean |SHAP| per feature block):")
+    for block, total in report.block_totals.items():
+        typer.echo(f"  {block:10s} {total:.4f}")
+    typer.echo(f"importance parquet: {report.importance_path}")
+    for fig in report.figure_paths:
+        typer.echo(f"figure: {fig}")
+
+
+@eval_app.command("sanity")
+def eval_sanity_cmd(
+    wines: list[str] = typer.Argument(
+        ..., help="Wine or winery name substrings (quote each, e.g. \"Sassicaia\")."
+    ),
+    top_pairings: int = typer.Option(5, "--top-pairings", help="Pairings shown per wine."),
+) -> None:
+    """Predict rating/body/acidity/pairings for named wines, next to the labels.
+
+    A wine whose rows live in the train split shows a fitted value, not a
+    forecast — the split column says which reading applies.
+    """
+    report = sanity_check(wines, top_pairings=top_pairings, notify_fn=typer.echo)
+    for r in report.rows:
+        typer.echo("")
+        typer.echo(f"{r.winery_name} — {r.wine_name} ({r.region_name}, {r.vintage_year})")
+        typer.echo(
+            f"  split={r.split}  age_at_review={r.age_at_review}  n_ratings={r.n_ratings}"
+        )
+        typer.echo(
+            f"  rating:  observed {r.observed_mean_rating:.2f}  ->  "
+            f"predicted {r.predicted_rating:.2f}"
+        )
+        typer.echo(f"  body:    actual {r.actual_body or '?':18s} predicted {r.predicted_body}")
+        typer.echo(
+            f"  acidity: actual {r.actual_acidity or '?':18s} predicted {r.predicted_acidity}"
+        )
+        typer.echo(f"  pairings predicted: {', '.join(r.predicted_pairings)}")
+        typer.echo(f"  pairings actual:    {', '.join(r.actual_pairings) or '(none)'}")
+    if report.unmatched:
+        typer.echo("")
+        typer.echo("unmatched: " + "; ".join(report.unmatched))
 
 
 if __name__ == "__main__":

@@ -74,6 +74,28 @@ TERROIR_SCHEMA: dict[str, pl.DataType] = {
     "soil_fetched_at": pl.Datetime("us", "UTC"),
 }
 
+# Columns that never become model features: QA rollup metadata and the
+# geographic join keys (region/country/vintage_year are carried by the
+# ratings side of the Phase 3 join; lat/lon are geometry, not terroir).
+_NON_FEATURE_SUFFIXES: tuple[str, ...] = ("_status", "_error", "_fetched_at")
+_NON_FEATURE_COLS: frozenset[str] = frozenset({"region", "country", "lat", "lon", "vintage_year"})
+
+
+def terroir_feature_cols() -> list[str]:
+    """The terroir columns that enter models as features, in schema order.
+
+    Single source for "what is the terroir block" — Phase 3 assembly
+    (features/build.py) carries exactly these columns into the processed
+    table, and the Phase 5 ablation drops exactly these columns to measure
+    the block's contribution. Deriving both from TERROIR_SCHEMA keeps them
+    in lockstep when the schema grows.
+    """
+    return [
+        c
+        for c in TERROIR_SCHEMA
+        if not any(c.endswith(s) for s in _NON_FEATURE_SUFFIXES) and c not in _NON_FEATURE_COLS
+    ]
+
 
 def build_terroir_table(
     *,

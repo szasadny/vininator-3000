@@ -311,6 +311,23 @@ PROCESSED_TRAIN_PARQUET = "train.parquet"
 PROCESSED_TEST_PARQUET = "test.parquet"
 PROCESSED_FUTURE_VINTAGE_TEST_PARQUET = "future_vintage_test.parquet"
 
+# Phase 5 evaluation artifacts (consumed by scripts/build_results.py).
+ABLATIONS_PARQUET = "ablations.parquet"
+SHAP_IMPORTANCE_PARQUET = "shap_importance.parquet"
+
+# SHAP runs on a seeded sample of eval cells — CatBoost's ShapValues over the
+# full test split (~340k cells × 121 features) costs multiple GB of float64
+# for no ranking benefit; 100k cells gives stable mean-|SHAP| orderings.
+SHAP_SAMPLE_CELLS = 100_000
+SHAP_TOP_N_FEATURES = 20
+# Terroir variables whose SHAP dependence plots RESULTS.md §7 wants to show.
+SHAP_DEPENDENCE_FEATURES: tuple[str, ...] = (
+    "gdd_10c",
+    "gdd_10c_anom",
+    "precip_harvest_mm",
+    "calcareous",
+)
+
 # ---------------------------------------------------------------------------
 # Phase 4 — Modeling
 # ---------------------------------------------------------------------------
@@ -354,6 +371,14 @@ MODEL_METADATA_COLS: tuple[str, ...] = (
     "sample_weight",
     "rating",
     CELL_N_RATINGS_COL,
+)
+
+# Producer aggregate features (train-fold, leave-one-wine-out; see
+# features/build.py). Named here so the Phase 5 ablation can drop the block.
+PRODUCER_FEATURE_COLS: tuple[str, ...] = (
+    "producer_mean_rating",
+    "producer_rating_std",
+    "producer_n_reviews",
 )
 
 # The per-row CatBoost weight column (log(1 + n_ratings_in_train), train-fold).
@@ -554,6 +579,24 @@ class Settings(BaseSettings):
     def processed_future_vintage_test_parquet(self) -> Path:
         """Future-vintage holdout (vintage 2019–2021, any WineID)."""
         return self.processed_dir / PROCESSED_FUTURE_VINTAGE_TEST_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ablations_parquet(self) -> Path:
+        """Phase 5 ablation grid (arm × split × metrics), one row per pair."""
+        return self.processed_dir / ABLATIONS_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def shap_importance_parquet(self) -> Path:
+        """Phase 5 mean-|SHAP| per feature on the rating model."""
+        return self.processed_dir / SHAP_IMPORTANCE_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def figures_dir(self) -> Path:
+        """Figures embedded by RESULTS.md (SHAP plots, ablation charts)."""
+        return _project_root() / "reports" / "figures"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

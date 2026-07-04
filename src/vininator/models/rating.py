@@ -183,12 +183,12 @@ def train_rating(
 
     with track_run("rating", params=run_params, dataset_hash=dhash, enabled=track) as logger:
         notify(notify_fn, "... fitting RMSE regressor")
-        model = _fit(cfg, "RMSE", train_pool, eval_pool)
+        model = fit_regressor(cfg, "RMSE", train_pool, eval_pool)
 
         notify(notify_fn, "... fitting quantile heads")
         lo_alpha, hi_alpha = RATING_QUANTILES
-        q_lo = _fit(cfg, f"Quantile:alpha={lo_alpha}", train_pool, eval_pool)
-        q_hi = _fit(cfg, f"Quantile:alpha={hi_alpha}", train_pool, eval_pool)
+        q_lo = fit_regressor(cfg, f"Quantile:alpha={lo_alpha}", train_pool, eval_pool)
+        q_hi = fit_regressor(cfg, f"Quantile:alpha={hi_alpha}", train_pool, eval_pool)
 
         # Pools are no longer needed — free before loading eval splits.
         del train_pool, eval_pool
@@ -203,7 +203,7 @@ def train_rating(
             if eval_df.is_empty():
                 del eval_df
                 continue
-            metrics = _evaluate(model, spec, eval_df, split_name)
+            metrics = evaluate_regressor(model, spec, eval_df, split_name)
             eval_metrics.append(metrics)
             baselines[split_name] = apply_rating_baselines(baseline_fit, eval_df)
             cells = aggregate_rating_cells(eval_df)
@@ -256,24 +256,32 @@ def train_rating(
 
 
 # ---------------------------------------------------------------------------
-# Private helpers
+# Fit + evaluate helpers (shared with eval/ablations.py)
 # ---------------------------------------------------------------------------
 
 
-def _fit(
+def fit_regressor(
     cfg: TrainConfig,
     loss_function: str,
     train_pool: Any,
     eval_pool: Any | None,
+    *,
+    snapshot_stem: str | None = None,
 ) -> CatBoostRegressor:
-    """Fit one CatBoostRegressor with the given loss, early-stopping if possible."""
+    """Fit one CatBoostRegressor with the given loss, early-stopping if possible.
+
+    `snapshot_stem` namespaces the crash-recovery snapshot file so concurrent
+    or interleaved trainings (e.g. the ablation arms) never resume from each
+    other's snapshots.
+    """
     params = resolve_catboost_params(cfg, loss_function=loss_function)
     # Snapshot every 5 min so a crash can resume rather than restart from scratch.
     # Requires `allow_writing_files: true` in the config (the resolver defaults
     # it off for tests); CatBoost's scratch logs then land in snapshots_dir
     # instead of a `catboost_info/` dir in the CWD.
     safe_loss = loss_function.split(":")[0]
-    snapshot = get_settings().snapshots_dir / f"rating_{cfg.name}_{safe_loss}.cbm"
+    stem = snapshot_stem if snapshot_stem is not None else f"rating_{cfg.name}"
+    snapshot = get_settings().snapshots_dir / f"{stem}_{safe_loss}.cbm"
     use_snapshot = params.get("allow_writing_files", True) is not False
     if use_snapshot:
         params.setdefault("train_dir", str(get_settings().snapshots_dir))
@@ -292,7 +300,7 @@ def _fit(
     return model
 
 
-def _evaluate(
+def evaluate_regressor(
     model: CatBoostRegressor, spec: FeatureSpec, eval_df: pl.DataFrame, split_name: str
 ) -> EvalMetrics:
     """Per-rating and cell-level RMSE/MAE (plus the noise floor) on one eval split.

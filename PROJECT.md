@@ -189,7 +189,7 @@ Build the final training table with these blocks:
 **Soil & terrain block** (from Phase 2) — CaCO3, pH, clay/sand/silt %, organic carbon, CEC, bulk density, elevation, slope + derived `drainage_class` (categorical) and `calcareous` (boolean), joined on `region` only. Treat as static per region.
 
 **Producer aggregates** (carefully, to avoid leakage)
-- Producer mean rating, std, n_reviews — computed **on the training fold only**.
+- Producer mean rating, std, n_reviews — computed **on the training fold only** and **leave-one-wine-out** (a wine's own ratings are excluded from its winery aggregates, so train semantics match what a held-out wine sees; without this the feature is a near-copy of the label at small wineries).
 
 *(No text-derived features: X-Wines ships no review text. Body and Acidity come as structured labels and are targets, not parsed features.)*
 
