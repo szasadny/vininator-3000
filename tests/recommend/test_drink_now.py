@@ -10,6 +10,7 @@ from vininator.recommend.drink_now import (
     RecommendFilters,
     apply_filters,
     build_candidates,
+    load_recommend_bundles,
     recommend_drink_now,
     train_age_bounds,
 )
@@ -72,3 +73,20 @@ def test_recommend_drink_now_scores_and_writes(trained_bundles: Settings) -> Non
 
     written = pl.read_parquet(report.path)
     assert written.height == report.table.height
+
+
+def test_shared_candidates_and_bundles_match_fresh_run(trained_bundles: Settings) -> None:
+    # Passing a prebuilt candidate table + bundles must give the identical ranking
+    # to letting the function build them itself (the generator reuses them).
+    cands = build_candidates()
+    bundles = load_recommend_bundles()
+    shared = recommend_drink_now(opening_year=2026, top=5, candidates=cands, bundles=bundles)
+    fresh = recommend_drink_now(opening_year=2026, top=5)
+
+    assert (
+        shared.table.get_column("wine_id").to_list() == fresh.table.get_column("wine_id").to_list()
+    )
+    assert (
+        shared.table.get_column("predicted_rating").to_list()
+        == fresh.table.get_column("predicted_rating").to_list()
+    )

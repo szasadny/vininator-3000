@@ -21,6 +21,7 @@ from vininator.config import STANDOUT_TOP_N, STANDOUT_YEAR_RANGE, get_settings
 from vininator.models.dataset import NotifyFn, notify
 from vininator.recommend.drink_now import (
     DRINK_NOW_OUT_COLS,
+    Bundles,
     RecommendFilters,
     apply_static_filters,
     apply_vintage_filters,
@@ -51,6 +52,8 @@ def recommend_standout_years(
     filters: RecommendFilters | None = None,
     top: int = STANDOUT_TOP_N,
     out_path: Path | None = None,
+    candidates: pl.DataFrame | None = None,
+    bundles: Bundles | None = None,
     notify_fn: NotifyFn | None = None,
 ) -> StandoutReport:
     """Top-`top` wines to open in each year of `[from_year, to_year]`.
@@ -59,12 +62,16 @@ def recommend_standout_years(
     year's age, takes the top-`top` by predicted rating, and tags them with the
     year and their within-year rank. The blocks are concatenated into one
     long-format table keyed `(opening_year, rank, ...)`.
+
+    Pass the raw `candidates` frame and `bundles` to reuse them across calls (see
+    `recommend_drink_now`); this call still applies its own static filters.
     """
     filters = filters or RecommendFilters()
     out_path = out_path or get_settings().recommendations_standout_years_parquet
 
-    bundles = load_recommend_bundles()
-    base = apply_static_filters(build_candidates(notify_fn), filters)
+    bundles = bundles or load_recommend_bundles()
+    raw = candidates if candidates is not None else build_candidates(notify_fn)
+    base = apply_static_filters(raw, filters)
     base = enrich_profile(base, bundles)
     age_bounds = train_age_bounds()
 

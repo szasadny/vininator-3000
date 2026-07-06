@@ -18,7 +18,7 @@ Under the hood: every rating in X-Wines is timestamped against its vintage, so `
 
 ## Status
 
-In development — Phases 1–5 (data, terroir pipeline, features, modeling, evaluation) are complete; Phase 6 (the recommender) is next. See [PROJECT.md](./PROJECT.md) for the full plan and current phase.
+Complete — all seven phases (data, terroir pipeline, features, modeling, evaluation, recommender, findings publication) are done. See [RESULTS.md](./RESULTS.md) for the picks and the model-quality numbers, and [PROJECT.md](./PROJECT.md) for the full plan.
 
 This is a batch / CLI project — no hosted UI, no live API. The deliverable is the four ranking tables in [RESULTS.md](./RESULTS.md), backed by the trained models and the honest model-quality numbers that say how much to trust each list.
 
@@ -82,8 +82,9 @@ uv run vininator train harmonize --config configs/harmonize_v1.yaml
 # Or you can run all of the above using
 # uv run vininator train all
 
-# 6. Measure each feature block's contribution by retraining with it dropped
+# 6. Diagnostics: feature-block ablations + SHAP figures (reports/figures/)
 uv run vininator eval ablations
+uv run vininator eval shap
 
 # 7. Drink-now and age-well rankings (Phase 6)
 uv run vininator recommend drink-now --opening-year 2026 --grape pinot-noir --max-vintage-age 5
@@ -91,7 +92,7 @@ uv run vininator recommend age-well  --opening-year 2026 --horizon 10 --grape ne
 uv run vininator recommend standout-years --from-year 2026 --to-year 2031
 uv run vininator recommend outliers --opening-year 2026
 
-# 8. Regenerate RESULTS.md + reports/figures from the trained artifacts
+# 8. Regenerate RESULTS.md + the per-grape tables from the trained artifacts
 uv run python scripts/build_results.py
 ```
 

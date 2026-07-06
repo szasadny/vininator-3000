@@ -470,6 +470,54 @@ RECOMMENDATIONS_AGE_WELL_SUMMARY_PARQUET = "recommendations_age_well_summary.par
 RECOMMENDATIONS_STANDOUT_YEARS_PARQUET = "recommendations_standout_years.parquet"
 RECOMMENDATIONS_OUTLIERS_PARQUET = "recommendations_outliers.parquet"
 
+# ---------------------------------------------------------------------------
+# Phase 7 — Findings publication (scripts/build_results.py)
+# ---------------------------------------------------------------------------
+#
+# The generator reads the trained bundles + recommendation parquets and emits
+# RESULTS.md end-to-end (no hand-typed numbers). These constants pick the grapes
+# and wines it reports on; per-grape ranking parquets land in reports/tables/.
+
+# Per-grape ranking tables in RESULTS.md §3: (CLI slug, fresh-style age cap).
+# None = no cap (cellar-style reds); the aromatic whites get a 5-year cap.
+RESULTS_MAJOR_GRAPES: tuple[tuple[str, int | None], ...] = (
+    ("cabernet-sauvignon", None),
+    ("pinot-noir", None),
+    ("chardonnay", 5),
+    ("riesling", 5),
+    ("nebbiolo", None),
+    ("tempranillo", None),
+    ("syrah/shiraz", None),  # X-Wines labels this grape "Syrah/Shiraz"
+    ("sangiovese", None),
+)
+RESULTS_TABLE_TOP_N = 10  # rows per ranking table in RESULTS.md
+RESULTS_OUTLIER_TABLE_N = 20  # §4.2 shows more rows — the shortlist is the point
+RESULTS_QUANTILE_NOMINAL = 0.8  # 0.1/0.9 heads → nominal 80% band, the coverage target
+
+# Classic blends the monogrape default hides, featured region-filtered in §3.3:
+# (RegionName matched case-insensitively, display heading). Amarone della
+# Valpolicella is a Corvina-based blend, so it never reaches the grape tables.
+RESULTS_SHOWCASE_REGIONS: tuple[tuple[str, str], ...] = (
+    ("amarone della valpolicella", "Amarone della Valpolicella"),
+    ("amarone della valpolicella classico", "Amarone della Valpolicella Classico"),
+)
+
+# §8 qualitative sanity check: (name substring for eval/sanity.py, preferred
+# vintage). Substrings avoid accents so a cp1252 console never trips; a null
+# vintage falls back to each wine's most-rated one.
+RESULTS_SANITY_QUERIES: tuple[tuple[str, int | None], ...] = (
+    ("masi costasera", 2016),  # Amarone della Valpolicella
+    ("marchesi di barolo", None),  # Nebbiolo
+    ("sessantanni", None),  # Primitivo di Manduria
+    ("nero d'avola", None),  # Nero d'Avola
+    ("tignanello", None),  # Super Tuscan
+    ("brunello", None),  # Sangiovese
+    ("de riscal", None),  # Tempranillo (Marques de Riscal; "riscal" alone hits "Friscale")
+    ("beaujolais", None),  # Beaujolais (Gamay)
+    ("neuf-du-pape", None),  # Southern-Rhone GSM
+    ("guigal", None),  # Cotes du Rhone
+)
+
 
 def _project_root() -> Path:
     """Walk up from this file until we find the repo's `pyproject.toml`.
@@ -662,6 +710,18 @@ class Settings(BaseSettings):
     def recommendations_outliers_parquet(self) -> Path:
         """Phase 6 overperformer outliers (predicted rating vs. peer baseline)."""
         return self.processed_dir / RECOMMENDATIONS_OUTLIERS_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def results_md(self) -> Path:
+        """The generated RESULTS.md at the repo root (Phase 7 deliverable)."""
+        return _project_root() / "RESULTS.md"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def report_tables_dir(self) -> Path:
+        """Per-grape ranking parquets backing the RESULTS.md §3 tables."""
+        return _project_root() / "reports" / "tables"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

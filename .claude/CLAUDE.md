@@ -37,7 +37,7 @@ src/vininator/
   data/         # X-Wines loader, geocoding (cached, resumable)
   features/     # climate.py (NASA POWER → GDD/precip/anomalies), soil.py, terroir.py (joiner), text.py (Harmonize parsing), build.py (assemble final table)
   models/       # dataset.py (shared feature contract + cell aggregation), rating.py, profile.py, harmonize.py, artifacts.py, tracking.py
-  eval/         # metrics, ablations, SHAP
+  eval/         # metrics, ablations, SHAP, sanity, report_data (RESULTS.md assembly)
   recommend/    # drink_now.py, age_well.py, standout_years.py, outliers.py (Phase 6)
   cli.py        # typer CLI entrypoint: `vininator train rating`, etc.
 
@@ -46,6 +46,10 @@ data/
   interim/      # geocoded regions, climate.parquet, soil.parquet, terroir.parquet
   processed/    # final feature parquets (train/test/future_vintage) + recommendation parquets
   models/       # trained bundles (.cbm + .meta.json), gitignored
+
+reports/
+  figures/      # SHAP + ablation charts embedded in RESULTS.md (tracked)
+  tables/       # per-grape / region recommendation parquets for RESULTS.md (gitignored)
 
 notebooks/      # exploration only — see PROJECT.md §5 for the numbered list
 configs/        # yaml per experiment

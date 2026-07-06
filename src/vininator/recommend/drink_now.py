@@ -318,6 +318,8 @@ def recommend_drink_now(
     filters: RecommendFilters | None = None,
     top: int = RECOMMEND_TOP_N,
     out_path: Path | None = None,
+    candidates: pl.DataFrame | None = None,
+    bundles: Bundles | None = None,
     notify_fn: NotifyFn | None = None,
 ) -> DrinkNowReport:
     """Rank wines by predicted rating at a single opening year.
@@ -326,13 +328,19 @@ def recommend_drink_now(
     vintage_year`, sorts by predicted rating, and writes the top-`top` rows to
     `out_path` (default: the configured drink-now parquet). The returned table
     is the same top-`top` slice, for the CLI to print.
+
+    Pass `candidates` (the raw, unfiltered `build_candidates()` frame) and
+    `bundles` to reuse them across many calls — the generator scores dozens of
+    grape slices without rebuilding the candidate table each time. This call
+    still applies its own filters.
     """
     filters = filters or RecommendFilters()
     settings = get_settings()
     out_path = out_path or settings.recommendations_drink_now_parquet
 
-    bundles = load_recommend_bundles()
-    candidates = apply_filters(build_candidates(notify_fn), filters, opening_year)
+    bundles = bundles or load_recommend_bundles()
+    raw = candidates if candidates is not None else build_candidates(notify_fn)
+    candidates = apply_filters(raw, filters, opening_year)
     if candidates.is_empty():
         raise ValueError(
             f"No wines match the filters at opening year {opening_year}. "

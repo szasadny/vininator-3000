@@ -8,3 +8,4 @@ fixtures are shared from tests/models/conftest.py rather than duplicated.
 from __future__ import annotations
 
 from tests.models.conftest import processed_dataset, write_config  # noqa: F401
+from tests.recommend.conftest import trained_bundles  # noqa: F401

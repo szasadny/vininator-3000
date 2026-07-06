@@ -27,6 +27,7 @@ from vininator.config import (
 )
 from vininator.models.dataset import NotifyFn, notify
 from vininator.recommend.drink_now import (
+    Bundles,
     RecommendFilters,
     apply_filters,
     build_candidates,
@@ -74,6 +75,8 @@ def recommend_age_well(
     top: int = RECOMMEND_TOP_N,
     out_path: Path | None = None,
     summary_path: Path | None = None,
+    candidates: pl.DataFrame | None = None,
+    bundles: Bundles | None = None,
     notify_fn: NotifyFn | None = None,
 ) -> AgeWellReport:
     """Sweep each candidate over `opening_year .. opening_year + horizon`.
@@ -83,14 +86,18 @@ def recommend_age_well(
     candidate copy). The long sweep goes to `out_path`; the per-bottle summary —
     peak year/rating, slope to peak, trajectory — goes to `summary_path`. The
     returned `table` is the top-`top` non-declining bottles by peak rating.
+
+    Pass the raw `candidates` frame and `bundles` to reuse them across calls (see
+    `recommend_drink_now`); this call still applies its own filters.
     """
     filters = filters or RecommendFilters()
     settings = get_settings()
     out_path = out_path or settings.recommendations_age_well_parquet
     summary_path = summary_path or settings.recommendations_age_well_summary_parquet
 
-    bundles = load_recommend_bundles()
-    candidates = apply_filters(build_candidates(notify_fn), filters, opening_year)
+    bundles = bundles or load_recommend_bundles()
+    raw = candidates if candidates is not None else build_candidates(notify_fn)
+    candidates = apply_filters(raw, filters, opening_year)
     if candidates.is_empty():
         raise ValueError(
             f"No wines match the filters at opening year {opening_year}. "

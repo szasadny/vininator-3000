@@ -76,6 +76,8 @@ def sanity_check(
     queries: list[str],
     *,
     top_pairings: int = 5,
+    preferred_vintages: dict[str, int] | None = None,
+    max_matches: int | None = None,
     notify_fn: NotifyFn | None = None,
 ) -> SanityReport:
     """Predict rating + profile + pairings for wines matched by name.
@@ -83,13 +85,21 @@ def sanity_check(
     Args:
         queries: Case-insensitive substrings matched against
             `"{WineryName} {WineName}"` in the raw wines table; each query
-            contributes at most `_MAX_MATCHES_PER_QUERY` wines.
+            contributes at most `max_matches` wines.
         top_pairings: How many highest-probability pairings to report.
+        preferred_vintages: Optional query → vintage_year. When a match has
+            processed rows for that vintage it is scored instead of the
+            most-rated one, so RESULTS.md can pin a specific bottle; otherwise
+            the most-rated vintage is used and a milestone is emitted.
+        max_matches: Cap on wines kept per query (default
+            `_MAX_MATCHES_PER_QUERY`). Pass 1 to score exactly one wine each.
         notify_fn: Milestone callback (CLI passes `typer.echo`).
 
     Returns:
         A `SanityReport`; queries that matched nothing land in `unmatched`.
     """
+    preferred_vintages = preferred_vintages or {}
+    cap = max_matches if max_matches is not None else _MAX_MATCHES_PER_QUERY
     settings = get_settings()
     wines = (
         pl.scan_parquet(settings.xwines_wines_parquet)
@@ -109,13 +119,12 @@ def sanity_check(
         if hit.is_empty():
             unmatched.append(query)
             continue
-        if hit.height > _MAX_MATCHES_PER_QUERY:
+        if hit.height > cap:
             notify(
                 notify_fn,
-                f"... {query!r} matched {hit.height} wines; keeping the first "
-                f"{_MAX_MATCHES_PER_QUERY}",
+                f"... {query!r} matched {hit.height} wines; keeping the first {cap}",
             )
-            hit = hit.head(_MAX_MATCHES_PER_QUERY)
+            hit = hit.head(cap)
         matches.extend(
             (query, row["WineID"], row["WineName"], row["WineryName"], row["RegionName"])
             for row in hit.iter_rows(named=True)
@@ -151,6 +160,8 @@ def sanity_check(
                 acidity=acidity,
                 harmonize=harmonize,
                 top_pairings=top_pairings,
+                preferred_vintage=preferred_vintages.get(query),
+                notify_fn=notify_fn,
             )
         )
     return SanityReport(rows=out, unmatched=unmatched)
@@ -188,14 +199,15 @@ def _score_wine(
     acidity: ModelBundle,
     harmonize: ModelBundle,
     top_pairings: int,
+    preferred_vintage: int | None = None,
+    notify_fn: NotifyFn | None = None,
 ) -> SanityRow:
-    """Score the wine's most-rated vintage at its most-rated review age."""
-    top_vintage = (
-        wine_rows.group_by("vintage_year")
-        .len()
-        .sort("len", descending=True)
-        .get_column("vintage_year")[0]
-    )
+    """Score one vintage of the wine: the preferred one if present, else most-rated.
+
+    `preferred_vintage` lets RESULTS.md pin a specific bottle; when that vintage
+    has no processed rows for this wine the most-rated vintage is used instead.
+    """
+    top_vintage = _pick_vintage(wine_rows, query, preferred_vintage, notify_fn)
     vintage_rows = wine_rows.filter(pl.col("vintage_year") == top_vintage)
 
     # Rating: predict the most-rated (wine, vintage, age) cell.
@@ -242,6 +254,28 @@ def _score_wine(
         predicted_acidity=predicted_acidity,
         predicted_pairings=predicted_pairings,
         actual_pairings=actual_pairings,
+    )
+
+
+def _pick_vintage(
+    wine_rows: pl.DataFrame,
+    query: str,
+    preferred_vintage: int | None,
+    notify_fn: NotifyFn | None,
+) -> int:
+    """The preferred vintage if it has rows, else the most-rated one."""
+    if preferred_vintage is not None:
+        if not wine_rows.filter(pl.col("vintage_year") == preferred_vintage).is_empty():
+            return preferred_vintage
+        notify(
+            notify_fn,
+            f"... {query!r}: vintage {preferred_vintage} has no processed rows; using most-rated",
+        )
+    return int(
+        wine_rows.group_by("vintage_year")
+        .len()
+        .sort("len", descending=True)
+        .get_column("vintage_year")[0]
     )
 
 
