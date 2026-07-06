@@ -429,6 +429,47 @@ BODY_BUNDLE = "body"
 ACIDITY_BUNDLE = "acidity"
 HARMONIZE_BUNDLE = "harmonize"
 
+# ---------------------------------------------------------------------------
+# Phase 6 — Recommender
+# ---------------------------------------------------------------------------
+#
+# The recommender loads the saved bundles and the already-built processed
+# parquets, then sweeps `age_at_review` (opening_year − vintage_year) against
+# the rating model to project drink-now / age-well rankings. Vintage — and
+# therefore terroir — is held constant, so there is no live fetch and no
+# feature re-engineering (the same rule `eval/sanity.py` follows).
+
+# Default opening year for drink-now / outliers when the CLI omits `--opening-year`.
+DEFAULT_OPENING_YEAR = 2026
+# Age-well sweeps opening_year .. opening_year + horizon (inclusive).
+RECOMMEND_HORIZON_YEARS = 10
+# Standout-of-the-year window (inclusive), one shortlist per year.
+STANDOUT_YEAR_RANGE: tuple[int, int] = (2026, 2031)
+# Default top-N sizes: the long rankings keep everything, these bound the
+# curated / printed shortlist.
+RECOMMEND_TOP_N = 50
+STANDOUT_TOP_N = 10
+# Pairings shown per wine in the ranking tables (highest-probability first).
+RECOMMEND_TOP_PAIRINGS = 5
+# |Δrating| below which an age-well trajectory counts as "holds steady".
+AGE_WELL_PLATEAU_EPS = 0.02
+
+# Overperformer outliers: a peer group (per-(grape, region) or per-(region,
+# vintage)) is only trusted as a baseline when it has at least this many
+# distinct training wines — matches the Phase 1 EDA "cells with >= 5 wines"
+# convention. `peer_baseline` aggregates the supported group means by max
+# (the stricter, harder-to-beat bar) or mean.
+OUTLIER_MIN_PEER_WINES = 5
+OUTLIER_PEER_AGG: Literal["max", "mean"] = "max"
+
+# Recommendation output parquets under data/processed/ (consumed by
+# scripts/build_results.py for the RESULTS.md ranking tables).
+RECOMMENDATIONS_DRINK_NOW_PARQUET = "recommendations_drink_now.parquet"
+RECOMMENDATIONS_AGE_WELL_PARQUET = "recommendations_age_well.parquet"
+RECOMMENDATIONS_AGE_WELL_SUMMARY_PARQUET = "recommendations_age_well_summary.parquet"
+RECOMMENDATIONS_STANDOUT_YEARS_PARQUET = "recommendations_standout_years.parquet"
+RECOMMENDATIONS_OUTLIERS_PARQUET = "recommendations_outliers.parquet"
+
 
 def _project_root() -> Path:
     """Walk up from this file until we find the repo's `pyproject.toml`.
@@ -591,6 +632,36 @@ class Settings(BaseSettings):
     def shap_importance_parquet(self) -> Path:
         """Phase 5 mean-|SHAP| per feature on the rating model."""
         return self.processed_dir / SHAP_IMPORTANCE_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_drink_now_parquet(self) -> Path:
+        """Phase 6 drink-now ranking (top wines at one opening year)."""
+        return self.processed_dir / RECOMMENDATIONS_DRINK_NOW_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_age_well_parquet(self) -> Path:
+        """Phase 6 age-well long-format sweep (one row per wine × opening year)."""
+        return self.processed_dir / RECOMMENDATIONS_AGE_WELL_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_age_well_summary_parquet(self) -> Path:
+        """Phase 6 age-well per-wine summary (peak year/rating, slope, trajectory)."""
+        return self.processed_dir / RECOMMENDATIONS_AGE_WELL_SUMMARY_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_standout_years_parquet(self) -> Path:
+        """Phase 6 standout-of-the-year shortlists (one block per opening year)."""
+        return self.processed_dir / RECOMMENDATIONS_STANDOUT_YEARS_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_outliers_parquet(self) -> Path:
+        """Phase 6 overperformer outliers (predicted rating vs. peer baseline)."""
+        return self.processed_dir / RECOMMENDATIONS_OUTLIERS_PARQUET
 
     @computed_field  # type: ignore[prop-decorator]
     @property

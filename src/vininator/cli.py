@@ -12,7 +12,16 @@ from pathlib import Path
 
 import polars as pl
 import typer
+from rich.console import Console
+from rich.table import Table
 
+from vininator.config import (
+    DEFAULT_OPENING_YEAR,
+    RECOMMEND_HORIZON_YEARS,
+    RECOMMEND_TOP_N,
+    STANDOUT_TOP_N,
+    STANDOUT_YEAR_RANGE,
+)
 from vininator.data.geocode import (
     filter_to_usable,
     geocode_regions,
@@ -30,6 +39,10 @@ from vininator.features.terroir import build_terroir_table
 from vininator.models.harmonize import HarmonizeReport, train_harmonize
 from vininator.models.profile import ProfileReport, train_profile
 from vininator.models.rating import RatingReport, train_rating
+from vininator.recommend.age_well import recommend_age_well
+from vininator.recommend.drink_now import RecommendFilters, recommend_drink_now
+from vininator.recommend.outliers import recommend_outliers
+from vininator.recommend.standout_years import recommend_standout_years
 
 app = typer.Typer(
     name="vininator",
@@ -53,6 +66,12 @@ eval_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(eval_app, name="eval")
+
+recommend_app = typer.Typer(
+    help="Phase 6 rankings: drink-now, age-well, standout-years, outliers.",
+    no_args_is_help=True,
+)
+app.add_typer(recommend_app, name="recommend")
 
 
 @data_app.command("download")
@@ -423,7 +442,7 @@ def eval_shap_cmd(
 @eval_app.command("sanity")
 def eval_sanity_cmd(
     wines: list[str] = typer.Argument(
-        ..., help="Wine or winery name substrings (quote each, e.g. \"Sassicaia\")."
+        ..., help='Wine or winery name substrings (quote each, e.g. "Sassicaia").'
     ),
     top_pairings: int = typer.Option(5, "--top-pairings", help="Pairings shown per wine."),
 ) -> None:
@@ -436,9 +455,7 @@ def eval_sanity_cmd(
     for r in report.rows:
         typer.echo("")
         typer.echo(f"{r.winery_name} — {r.wine_name} ({r.region_name}, {r.vintage_year})")
-        typer.echo(
-            f"  split={r.split}  age_at_review={r.age_at_review}  n_ratings={r.n_ratings}"
-        )
+        typer.echo(f"  split={r.split}  age_at_review={r.age_at_review}  n_ratings={r.n_ratings}")
         typer.echo(
             f"  rating:  observed {r.observed_mean_rating:.2f}  ->  "
             f"predicted {r.predicted_rating:.2f}"
@@ -452,6 +469,238 @@ def eval_sanity_cmd(
     if report.unmatched:
         typer.echo("")
         typer.echo("unmatched: " + "; ".join(report.unmatched))
+
+
+def _filters(
+    grape: str | None, region: str | None, max_vintage_age: int | None, monogrape: bool
+) -> RecommendFilters:
+    """Bundle the shared recommender CLI options into a `RecommendFilters`."""
+    return RecommendFilters(
+        grape=grape, region=region, max_vintage_age=max_vintage_age, monogrape=monogrape
+    )
+
+
+def _print_ranking(rows: pl.DataFrame, title: str) -> None:
+    """Render a drink-now / standout ranking as a rich table.
+
+    Standout blocks carry `opening_year` / `rank`; those columns are shown when
+    present so the same renderer serves both commands.
+    """
+    table = Table(title=title)
+    has_year = "opening_year" in rows.columns
+    if has_year:
+        table.add_column("Year", justify="right")
+        table.add_column("Rank", justify="right")
+    for col in (
+        "Winery",
+        "Wine",
+        "Region",
+        "Vintage",
+        "Rating (lo-hi)",
+        "Body",
+        "Acidity",
+        "Pairings",
+    ):
+        table.add_column(col)
+    for r in rows.iter_rows(named=True):
+        band = f"{r['predicted_rating']:.2f} ({r['predicted_rating_lo']:.2f}-{r['predicted_rating_hi']:.2f})"
+        cells = [
+            r["winery_name"] or "",
+            r["wine_name"] or "",
+            r["region_name"] or "",
+            str(r["vintage_year"]),
+            band,
+            r["predicted_body"],
+            r["predicted_acidity"],
+            ", ".join(r["top_pairings"]),
+        ]
+        if has_year:
+            cells = [str(r["opening_year"]), str(r["rank"]), *cells]
+        table.add_row(*cells)
+    Console().print(table)
+
+
+def _print_age_well(rows: pl.DataFrame, title: str) -> None:
+    """Render the age-well summary (peak year/rating, slope, trajectory)."""
+    table = Table(title=title)
+    for col in ("Winery", "Wine", "Region", "Vintage", "Peak yr", "Peak", "Slope/yr", "Trajectory"):
+        table.add_column(col)
+    for r in rows.iter_rows(named=True):
+        table.add_row(
+            r["winery_name"] or "",
+            r["wine_name"] or "",
+            r["region_name"] or "",
+            str(r["vintage_year"]),
+            str(r["predicted_peak_year"]),
+            f"{r['predicted_peak_rating']:.2f}",
+            f"{r['slope_to_peak']:+.3f}",
+            r["trajectory"],
+        )
+    Console().print(table)
+
+
+def _print_outliers(rows: pl.DataFrame, title: str) -> None:
+    """Render the overperformer table (predicted vs. peer baseline)."""
+    table = Table(title=title)
+    for col in (
+        "Winery",
+        "Wine",
+        "Region",
+        "Vintage",
+        "Predicted",
+        "Baseline",
+        "Overperf",
+        "lo-hi",
+    ):
+        table.add_column(col)
+    for r in rows.iter_rows(named=True):
+        table.add_row(
+            r["winery_name"] or "",
+            r["wine_name"] or "",
+            r["region_name"] or "",
+            str(r["vintage_year"]),
+            f"{r['predicted_rating']:.2f}",
+            f"{r['peer_baseline']:.2f}",
+            f"{r['overperformance']:+.2f}",
+            f"{r['predicted_rating_lo']:.2f}-{r['predicted_rating_hi']:.2f}",
+        )
+    Console().print(table)
+
+
+@recommend_app.command("drink-now")
+def recommend_drink_now_cmd(
+    opening_year: int = typer.Option(
+        DEFAULT_OPENING_YEAR, "--opening-year", help="Year to score wines as opened."
+    ),
+    grape: str | None = typer.Option(
+        None, "--grape", help="Restrict to a GrapeMajority (slug, e.g. pinot-noir)."
+    ),
+    region: str | None = typer.Option(None, "--region", help="Restrict to a RegionName (slug)."),
+    max_vintage_age: int | None = typer.Option(
+        None, "--max-vintage-age", help="Drop wines older than N years at the opening year."
+    ),
+    monogrape: bool = typer.Option(
+        True, "--monogrape/--no-monogrape", help="Keep only single-varietal wines."
+    ),
+    top: int = typer.Option(RECOMMEND_TOP_N, "--top", help="How many wines to keep."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output parquet (default: configured path)."
+    ),
+) -> None:
+    """Rank wines by predicted rating at one opening year."""
+    report = recommend_drink_now(
+        opening_year=opening_year,
+        filters=_filters(grape, region, max_vintage_age, monogrape),
+        top=top,
+        out_path=out,
+        notify_fn=typer.echo,
+    )
+    _print_ranking(report.table, f"Drink-now — opening year {report.opening_year}")
+    typer.echo(f"candidates scored: {report.n_candidates:,}")
+    typer.echo(f"parquet: {report.path}")
+
+
+@recommend_app.command("age-well")
+def recommend_age_well_cmd(
+    opening_year: int = typer.Option(
+        DEFAULT_OPENING_YEAR, "--opening-year", help="First year of the sweep."
+    ),
+    horizon: int = typer.Option(
+        RECOMMEND_HORIZON_YEARS, "--horizon", help="Years to project forward from the opening year."
+    ),
+    grape: str | None = typer.Option(None, "--grape", help="Restrict to a GrapeMajority (slug)."),
+    region: str | None = typer.Option(None, "--region", help="Restrict to a RegionName (slug)."),
+    max_vintage_age: int | None = typer.Option(
+        None, "--max-vintage-age", help="Drop wines older than N years at the opening year."
+    ),
+    monogrape: bool = typer.Option(
+        True, "--monogrape/--no-monogrape", help="Keep only single-varietal wines."
+    ),
+    top: int = typer.Option(RECOMMEND_TOP_N, "--top", help="How many cellar candidates to show."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Long-format output parquet (default: configured path)."
+    ),
+) -> None:
+    """Project each wine forward and surface the cellar candidates."""
+    report = recommend_age_well(
+        opening_year=opening_year,
+        horizon=horizon,
+        filters=_filters(grape, region, max_vintage_age, monogrape),
+        top=top,
+        out_path=out,
+        notify_fn=typer.echo,
+    )
+    _print_age_well(
+        report.table, f"Age-well — {report.opening_year} to {report.opening_year + report.horizon}"
+    )
+    typer.echo(f"sweep parquet:   {report.long_path}")
+    typer.echo(f"summary parquet: {report.summary_path}")
+
+
+@recommend_app.command("standout-years")
+def recommend_standout_years_cmd(
+    from_year: int = typer.Option(
+        STANDOUT_YEAR_RANGE[0], "--from-year", help="First drinking year."
+    ),
+    to_year: int = typer.Option(
+        STANDOUT_YEAR_RANGE[1], "--to-year", help="Last drinking year (inclusive)."
+    ),
+    grape: str | None = typer.Option(None, "--grape", help="Restrict to a GrapeMajority (slug)."),
+    region: str | None = typer.Option(None, "--region", help="Restrict to a RegionName (slug)."),
+    max_vintage_age: int | None = typer.Option(
+        None, "--max-vintage-age", help="Drop wines older than N years at each opening year."
+    ),
+    monogrape: bool = typer.Option(
+        True, "--monogrape/--no-monogrape", help="Keep only single-varietal wines."
+    ),
+    top: int = typer.Option(STANDOUT_TOP_N, "--top", help="Wines per year."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output parquet (default: configured path)."
+    ),
+) -> None:
+    """One 'what to open this year' shortlist per year in the window."""
+    report = recommend_standout_years(
+        from_year=from_year,
+        to_year=to_year,
+        filters=_filters(grape, region, max_vintage_age, monogrape),
+        top=top,
+        out_path=out,
+        notify_fn=typer.echo,
+    )
+    _print_ranking(report.table, f"Standouts — {report.from_year} to {report.to_year}")
+    typer.echo(f"years covered: {', '.join(str(y) for y in report.years_covered)}")
+    typer.echo(f"parquet: {report.path}")
+
+
+@recommend_app.command("outliers")
+def recommend_outliers_cmd(
+    opening_year: int = typer.Option(
+        DEFAULT_OPENING_YEAR, "--opening-year", help="Year to score wines as opened."
+    ),
+    grape: str | None = typer.Option(None, "--grape", help="Restrict to a GrapeMajority (slug)."),
+    region: str | None = typer.Option(None, "--region", help="Restrict to a RegionName (slug)."),
+    max_vintage_age: int | None = typer.Option(
+        None, "--max-vintage-age", help="Drop wines older than N years at the opening year."
+    ),
+    monogrape: bool = typer.Option(
+        True, "--monogrape/--no-monogrape", help="Keep only single-varietal wines."
+    ),
+    top: int = typer.Option(RECOMMEND_TOP_N, "--top", help="How many outliers to show."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output parquet (default: configured path)."
+    ),
+) -> None:
+    """Wines predicted to outscore their leakage-safe peer baseline."""
+    report = recommend_outliers(
+        opening_year=opening_year,
+        filters=_filters(grape, region, max_vintage_age, monogrape),
+        top=top,
+        out_path=out,
+        notify_fn=typer.echo,
+    )
+    _print_outliers(report.table, f"Overperformers — opening year {report.opening_year}")
+    typer.echo(f"outliers past the baseline gate: {report.n_outliers:,}")
+    typer.echo(f"parquet: {report.path}")
 
 
 if __name__ == "__main__":
