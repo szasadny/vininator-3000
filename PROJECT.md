@@ -23,7 +23,7 @@ The machinery is three prediction models, all structured (X-Wines ships no revie
 
 **Inputs:** grape variety/blend, region (hierarchical), per-rating vintage year, producer (`WineryID`), `age_at_review`, alcohol % (`ABV`), plus a derived **terroir feature block** that combines `region × vintage` weather from NASA POWER (MERRA-2 + CERES SYN1DEG) with `region`-level soil and terrain properties from SoilGrids.
 
-**On terroir:** that terroir influences wine quality is a working assumption of the feature design. The Phase 5 ablation measures what the terroir block actually contributes, and RESULTS.md reports that number honestly (even if it's small).
+**On terroir:** that terroir influences wine quality is a working assumption of the feature design. The Phase 5 ablation measures what the terroir block actually contributes, and RESULTS.md reports that number honestly (even if it's small). **Update (Phase 5, full variant): effectively zero.** Dropping all 27 terroir features moved held-out cell-level RMSE by +0.0001 (0.3448 → 0.3449) and *improved* the future-vintage split by 0.0005. At region-centroid granularity, the region categorical already carries whatever signal region-keyed climate/soil encodes — see the ablation notes at the end of Phase 5.
 
 ---
 
@@ -267,6 +267,19 @@ This is the closest stand-in we have for a tasting profile without review text �
 - **Ablations:** drop terroir, drop producer, drop `age_at_review`. Quantify each block's marginal contribution on the cell-level metric. Ablations retrain the **RMSE head only** — the quantile heads don't affect the ablation conclusion and would triple the cost.
 - **Qualitative sanity check:** pick 10 wines I personally know, predict ratings + Body/Acidity + pairings, eyeball it. Disagreements get written up in RESULTS.md — they're more interesting than the agreements.
 
+**Ablation findings (full variant, RMSE head, cell-level weighted RMSE; grid persisted at `data/processed/ablations.parquet`):**
+
+| arm | test | Δ vs. full | future-vintage | Δ vs. full |
+| --- | ---: | ---: | ---: | ---: |
+| full (121 features) | 0.3448 | — | 0.2524 | — |
+| − terroir (27 dropped) | 0.3449 | +0.0001 | 0.2519 | −0.0005 |
+| − producer (3 dropped) | 0.3473 | +0.0025 | 0.2572 | +0.0048 |
+| − `age_at_review` (1 dropped) | 0.3586 | +0.0138 | 0.2502 | −0.0022 |
+
+- **Terroir contributes nothing measurable.** The deltas (+0.0001 / −0.0005) are noise on both splits — including the future-vintage split, which was designed to reveal genuine vintage-weather learning. The block is redundant: climate is keyed by `(region, vintage)` and soil by `region`, and the region categorical plus vintage year already absorb that signal at region-centroid (~55 km) granularity. The features stay in the shipped model (they cost nothing at inference and the recommender never re-fetches them), but RESULTS.md reports the block as earning ~zero.
+- **`age_at_review` is the largest single contributor on held-out wines** (+0.0138), validating the Phase 6 lever. Its *negative* delta on the future-vintage split is an artifact of that split's construction: 2019–2021 vintages rated by 2021 means age spans only 0–2 years, so there is almost no age variation to exploit there.
+- **Producer aggregates earn a real but modest** +0.0025 / +0.0048 on top of the raw `WineryID` categorical (which all arms keep).
+
 ### Phase 6 — Drink-now & age-well recommender
 
 Once the rating model is trained, `age_at_review` is the lever that turns it into a recommender. Every wine in X-Wines has a fixed `(grape, region, vintage_year, terroir_block, producer, ...)`. Sweeping `age_at_review` over future opening years projects the model's predicted rating trajectory for that wine — no live terroir fetch required, since vintage_year (and therefore the terroir features) is held constant.
@@ -365,84 +378,16 @@ The final deliverable. A self-contained writeup at the project root that someone
 
 ---
 
-## 5. Project structure
+## 5. Realistic things to know
 
-```
-vininator/
-├── pyproject.toml          # uv for deps; ruff + pytest configured
-├── README.md
-├── PROJECT.md              # this file
-├── RESULTS.md              # Phase 7 deliverable — generated from trained artifacts
-├── CLAUDE.md               # operating rules for Claude Code
-├── data/
-│   ├── raw/                # X-Wines CSVs + parquets, NASA POWER JSON pulls, SoilGrids responses
-│   ├── interim/            # geocoded regions, climate.parquet, soil.parquet, terroir.parquet
-│   └── processed/          # final feature parquets + recommendation parquets
-├── src/vininator/
-│   ├── data/
-│   │   ├── load.py         # X-Wines loader
-│   │   └── geocode.py      # region → lat/lon (cached)
-│   ├── features/
-│   │   ├── climate.py      # NASA POWER → GDD, precip, anomalies
-│   │   ├── soil.py         # SoilGrids + DEM → CaCO3, pH, texture, slope, ...
-│   │   ├── terroir.py      # join climate + soil into the terroir block
-│   │   ├── text.py         # parse Harmonize food pairings → multi-hot features
-│   │   └── build.py        # assemble final feature table
-│   ├── models/
-│   │   ├── rating.py       # CatBoost rating regressor (+ quantile heads)
-│   │   ├── profile.py      # body/acidity classifiers
-│   │   └── harmonize.py    # Harmonize multi-label classifier
-│   ├── eval/
-│   │   ├── metrics.py
-│   │   └── ablations.py
-│   ├── recommend/
-│   │   ├── drink_now.py        # score wines at opening_year, rank by predicted rating
-│   │   ├── age_well.py         # sweep opening_year forward, find rising/peaking trajectories
-│   │   ├── standout_years.py   # per-year standout shortlists across 2026→2031
-│   │   └── outliers.py         # overperformers: predicted rating vs. peer-group baseline
-│   └── cli.py              # typer CLI: vininator train rating, vininator recommend, etc.
-├── scripts/
-│   └── build_results.py    # emits RESULTS.md tables + reports/figures from trained artifacts
-├── notebooks/              # 01_eda, 02_climate, 03_soil, 04_rating, 05_harmonize, 06_ablations, 07_recommender, 08_results
-├── configs/                # yaml per experiment (rating_v1.yaml, etc.)
-├── reports/figures/        # SHAP plots, ablation charts, recommender summaries embedded in RESULTS.md
-└── tests/
-```
-
----
-
-## 6. Stack
-
-| Layer | Choice | Why |
-| --- | --- | --- |
-| Language | Python 3.12 | Standard for ML |
-| Env / deps | `uv` | Fast, modern, lockfiles work |
-| Data wrangling | `polars` | Faster than pandas at 800k rows; lazy is nice |
-| Modeling | `catboost` | Native categorical support; no manual encoding |
-| Text | `ast`, `re` | Harmonize parsing (no review text in X-Wines, so no embeddings) |
-| Weather | NASA POWER Daily API | MERRA-2 + CERES SYN1DEG via clean JSON REST, no auth |
-| Soil | SoilGrids REST API (ISRIC) | Free, no auth, global 250 m coverage |
-| Terrain | SRTM 30 m via `elevation` or Open-Elevation | Free; elevation + slope per centroid |
-| Geocoding | `geopy` (Nominatim) | Free; respect rate limits |
-| Tracking | `mlflow` *or* `wandb` | Choose one; track from day one |
-| CLI | `typer` + `rich` | Subcommands for data, features, train, recommend; rich tables in stdout |
-| Reporting | Matplotlib + Markdown templating | RESULTS.md + reports/figures/, generated from artifacts |
-| Lint/test | ruff + pytest | Standard |
-
----
-
-## 7. Realistic things to know
-
-- **NASA POWER pulls take ~23 minutes sequentially.** One HTTP request per region (~1,377 total after the geocode blacklist), polite 1s spacing, exponential backoff on 5xx, resume-from-disk per JSON file. The cache *is* the state — a half-finished run restarts cleanly. Attribution must be embedded in derived artifacts (LaRC POWER + MERRA-2 + CERES SYN1DEG lineage). Public domain, no auth, no quota. We pivoted off Open-Meteo's ERA5-Land wrapper after discovering its free tier bills per data point — 30 years × 5 vars × one coordinate exceeded the daily quota in a single region pull. POWER's ~55 km cells are coarser than ERA5-Land's ~11 km, but for growing-season aggregates the difference is negligible next to the centroid-vs-vineyard error.
-- **Climatology window is 1991–2018, not the WMO-standard 1991–2020.** The baseline used to compute climate anomalies ends at the training cutoff so the anomaly column contains zero information about the 2019–2021 future-vintage holdout. Reporting that "the model generalizes to future vintages" would be a lie if the anomalies it trained on already peeked at those vintages.
-- **SoilGrids is fast but flaky.** Single-pixel queries can be noisy and the endpoint occasionally 5xxs. Always buffer-and-average, always retry with backoff, always cache.
-- **Geocoding has rate limits.** Nominatim asks for 1 req/sec. A few thousand regions is fine, just plan for it.
-- **Geocode `result_type` lies sometimes.** Nominatim happily resolves a wine-region string to a city, monument, or random POI when the appellation isn't in OSM under that exact name. The resulting `status='ok'` row points at the wrong place, and SoilGrids returns null on top of that wrong location. Audit the `result_type` distribution after the geocode pull and filter to a known-good whitelist (administrative / region / locality / hamlet / etc.) before training. Examples encountered in PR2 smoke: "Buenos Aires" → `city`, "Scanderbeg" → `square`.
-- **The full X-Wines variant is 21M ratings.** Plenty of data, but for iteration always work off the `slim` variant (150k ratings) or `--sample-frac` — full is for the final training run.
-- **Full-data training only fits in 16 GB RAM because of cell aggregation.** The raw train split is 15.5M rows (~6 GB in polars, doubled at the pandas boundary, plus CatBoost's quantized pool) — every pre-aggregation full run died on memory. Aggregated (2.25M cells for rating, ~450k wine-vintages for profile/harmonize) the whole Phase 4 sequence runs in an evening on the 12-core box with `thread_count: 10` keeping the machine usable. Don't undo this by materializing raw-row pools "just to check something" — check on `slim`.
-- **Per-rating RMSE is floored at ~0.64 by user disagreement.** A flat validation curve near that floor is the ceiling being hit, not a learning-rate problem. Diagnose model changes on the cell-level metric.
-- **Producer (`WineryID`) will dominate everything.** Be ready for the ablation to show terroir adding a few percent on top of producer + region + grape. That's fine — terroir is an assumption in the feature design, not the thesis. What matters is that the rankings are built on the best model available and that the ablation table reports honestly what each block earns.
-- **Coverage is skewed toward popular regions.** The model will be best at well-represented regions and worse at obscure ones. Check and report this explicitly.
-- **Splits matter.** Split by `WineID`, not by rating. Future-vintage split reveals real terroir learning vs. memorization.
-- **`age_at_review` is real but bounded.** `Date` covers 2012-2021, so ratings of pre-2012 vintages are over-represented at high ages; ratings of recent vintages are absent at high ages. Treat `age_at_review` as a feature, not a target.
-- **License.** X-Wines is CC0 (public domain). No restrictions on intermediate artifacts or trained models.
+- **NASA POWER pulls take ~23 minutes sequentially** (~1,377 regions, 1s spacing, backoff on 5xx, resume-from-disk per JSON). The cache *is* the state — a half-finished run restarts cleanly. Public domain, no auth, no quota; embed POWER/MERRA-2/CERES attribution in derived artifacts.
+- **Climatology window is 1991–2018, not WMO-standard 1991–2020.** The anomaly baseline ends at the training cutoff so it holds zero information about the 2019–2021 future-vintage holdout — otherwise "generalizes to future vintages" would be a lie.
+- **SoilGrids is flaky.** Buffer-and-average, retry with backoff, cache.
+- **Geocode `result_type` lies.** Nominatim resolves an unknown appellation to a city/POI and still returns `status='ok'` on the wrong place; SoilGrids then nulls on top. Filter to a known-good `result_type` whitelist before training. (Nominatim also rate-limits at 1 req/sec.)
+- **Iterate on `slim` (150k ratings), not full (21M)** — full is for the final run only. Full-data training fits in 16 GB *because* of cell aggregation; don't materialize raw-row pools "just to check something."
+- **Per-rating RMSE is floored at ~0.64 by reviewer disagreement.** A flat validation curve near that floor is the ceiling being hit, not a learning-rate problem. Diagnose model changes on the cell-level metric.
+- **Producer (`WineryID`) will dominate.** Expected terroir to add only a few percent on top of producer + region + grape; the Phase 5 ablation measured it at effectively **zero** (Δcell-RMSE +0.0001 on held-out wines, −0.0005 on future vintages). It's a feature-design assumption, not the thesis, and the ablation table in Phase 5 reports what each block earns.
+- **Coverage is skewed toward popular regions** — best there, worse on obscure ones. Report this explicitly.
+- **Split by `WineID`, not by rating.** The future-vintage split reveals real terroir learning vs. memorization.
+- **`age_at_review` is real but bounded.** `Date` covers 2012–2021, so pre-2012 vintages are over-represented at high ages and recent vintages absent there. It's a feature, not a target.
+- **License.** X-Wines is CC0 — no restrictions on artifacts or trained models.

@@ -9,14 +9,16 @@ The goal is pretty simple: It's to find the best wines. Vininator trains rating 
 - **Standouts per year**: For each drinking year 2026–2031, the bottles to open that year
 - **Overperformers**: Wines predicted to punch far above their region/grape/vintage peer group
 
-Under the hood: every rating in X-Wines is timestamped against its vintage, so `age_at_review` is a real model feature — sweeping it forward projects a wine's predicted rating to any future opening year. The feature set assumes terroir matters and encodes it properly: growing-season weather from [NASA POWER](https://power.larc.nasa.gov/) (MERRA-2 + CERES SYN1DEG) per `(region, vintage)` and [SoilGrids](https://soilgrids.org/) soil composition per region, next to grape, producer, and region. Supporting models predict body/acidity and food pairings to enrich the ranking tables. All rankings are published in [RESULTS.md](./RESULTS.md).
+Under the hood: every rating in X-Wines is timestamped against its vintage, so `age_at_review` is a real model feature — sweeping it forward projects a wine's predicted rating to any future opening year. The feature set was built on the assumption[^1] that terroir matters, encoding growing-season weather from [NASA POWER](https://power.larc.nasa.gov/) (MERRA-2 + CERES SYN1DEG) per `(region, vintage)` and [SoilGrids](https://soilgrids.org/) soil composition per region, next to grape, producer, and region.
+
+[^1]: this assumption turned out to be false, see [RESULTS.md](./RESULTS.md)
 
 
 ---
 
 ## Status
 
-In development, currently Phase 5. See [PROJECT.md](./PROJECT.md) for the full plan and current phase.
+In development — Phases 1–5 (data, terroir pipeline, features, modeling, evaluation) are complete; Phase 6 (the recommender) is next. See [PROJECT.md](./PROJECT.md) for the full plan and current phase.
 
 This is a batch / CLI project — no hosted UI, no live API. The deliverable is the four ranking tables in [RESULTS.md](./RESULTS.md), backed by the trained models and the honest model-quality numbers that say how much to trust each list.
 
@@ -95,29 +97,6 @@ uv run python scripts/build_results.py
 
 ---
 
-## Project layout
-
-```text
-src/vininator/
-  data/         X-Wines loader, geocoding (cached)
-  features/     Climate (NASA POWER), soil & terrain (SoilGrids + DEM), terroir joiner, Harmonize parsing, feature assembly
-  models/       CatBoost rating regressor (+ quantile heads), body / acidity classifiers, Harmonize multi-label
-  eval/         Metrics, ablations, SHAP
-  recommend/    the four rankings (drink-now, age-well, standout-years, outliers) by sweeping age_at_review
-  cli.py        Typer CLI entrypoint
-
-scripts/         build_results.py — regenerates RESULTS.md + reports/figures from artifacts
-data/            raw → interim → processed (never edited after write)
-notebooks/       01_eda, 02_climate, 03_soil, 04_rating, 05_harmonize, 06_ablations, 07_recommender, 08_results
-configs/         One YAML per experiment
-reports/figures/ SHAP plots, ablation charts, recommender summaries (embedded in RESULTS.md)
-tests/           pytest suite
-```
-
-Full structure and rationale: [PROJECT.md](./PROJECT.md). Working conventions: [CLAUDE.md](./CLAUDE.md).
-
----
-
 ## Data
 
 **Primary dataset:** [X-Wines](https://github.com/rogerioxavier/X-Wines) (Xavier 2023, MDPI BDCC). The full variant covers 100,646 wines and 21,013,536 ratings from 2012–2021, spanning 62 wine-producing countries.
@@ -134,9 +113,9 @@ Each rating ships with `Date` (ISO timestamp) plus the rated `Vintage`, so the l
 
 **License:** CC0 1.0 — public domain dedication. No usage restrictions.
 
-**Weather (Phase 2):** Daily climate from the [NASA POWER Daily API](https://power.larc.nasa.gov/docs/services/api/temporal/daily/) (`~0.5° / ~55 km`), serving MERRA-2 temperature/precipitation and CERES SYN1DEG solar radiation. Free, public-domain, no registration. One JSON per region cached under `data/raw/nasa_power/`.
+**Weather:** Daily climate from the [NASA POWER Daily API](https://power.larc.nasa.gov/docs/services/api/temporal/daily/) (`~0.5° / ~55 km`), serving MERRA-2 temperature/precipitation and CERES SYN1DEG solar radiation. Free, public-domain, no registration. One JSON per region cached under `data/raw/nasa_power/`.
 
-**Soil & terrain (Phase 2):** [SoilGrids](https://soilgrids.org/) (ISRIC) for topsoil composition — calcium carbonate (kalkgehalte), pH, texture, organic carbon, CEC, bulk density — plus SRTM elevation and derived slope. Pulled per region centroid, no auth required.
+**Soil & terrain:** [SoilGrids](https://soilgrids.org/) (ISRIC) for topsoil composition — calcium carbonate (kalkgehalte), pH, texture, organic carbon, CEC, bulk density — plus SRTM elevation and derived slope. Pulled per region centroid, no auth required.
 
 ---
 
@@ -158,7 +137,7 @@ The rankings are only as good as the models behind them, so model quality is mea
 - **Rating:** RMSE + MAE at two levels — per-rating (against leakage-safe baselines and the ~0.64 noise floor of user disagreement) and per wine-vintage cell (the headline: predicted vs. observed mean rating, where ranking quality actually lives). Quantile heads provide the confidence bands the rankings use to drop shaky picks.
 - **Profile:** per-attribute accuracy and macro-F1 against the X-Wines Body / Acidity labels, per held-out wine-vintage.
 - **Harmonize food pairings:** per-label F1 + Hamming loss on held-out wine-vintages.
-- **Ablations (diagnostic):** drop terroir, drop producer, drop `age_at_review` — quantify what each block actually contributes. Terroir is an assumption baked into the feature set; the ablation reports honestly how much it earns its place.
+- **Ablations (diagnostic):** drop terroir, drop producer, drop `age_at_review` — quantify what each block actually contributes. Terroir was an assumption baked into the feature set.
 - **SHAP** on the rating model to understand what's actually doing the work.
 
 All metrics, ablation tables, SHAP plots, and the four ranking tables are published in [RESULTS.md](./RESULTS.md).
