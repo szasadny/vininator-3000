@@ -354,10 +354,11 @@ def _section_4(standout, years: list[int], outliers, value_table: pl.DataFrame |
         "",
         "Best-rated monogrape wines (opening year 2026) priced at or under "
         f"€{int(RESULTS_VALUE_CAP_EUR)}. Price is post-hoc metadata from the Wine Reviews snapshot "
-        "(2017, USD, shown in EUR) - never a model input. Only **exact** winery+wine-name matches "
-        "count here: the coarser winery-median estimate underprices a winery's flagship, so it is "
-        "excluded from value rankings. Coverage skews to famous names. See the recommendation "
-        "library for per-grape value lists.",
+        "(2017 USD, adjusted to a 2026 EUR estimate for inflation and bottle aging) - never a "
+        "model input. Only **exact** winery+wine-name matches count here: the coarser "
+        "winery-median estimate underprices a winery's flagship, so it is excluded from value "
+        "rankings. Coverage skews to famous names. See the recommendation library for per-grape "
+        "value lists.",
         "",
     ]
     if value_table is None:
@@ -380,7 +381,8 @@ def _section_4(standout, years: list[int], outliers, value_table: pl.DataFrame |
         "- Outliers are only as trustworthy as their baseline; sparse peer cells are excluded by the "
         f"{OUTLIER_MIN_PEER_WINES}-wine support gate.",
         "- Value tables use only exact-priced wines; unpriced and winery-median-only wines are "
-        "dropped, not ranked low. Prices are a 2017 USD snapshot converted to EUR at a fixed rate.",
+        "dropped, not ranked low. Prices are a 2017 USD snapshot adjusted to 2026 (general "
+        "inflation + a per-year aging premium) and converted to EUR at a fixed rate.",
     ]
     return "\n".join(parts)
 

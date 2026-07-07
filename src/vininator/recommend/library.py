@@ -31,8 +31,12 @@ from vininator.config import (
     LIBRARY_TOP_N,
     LIBRARY_VINTAGE_QUALITY_AGE,
     LIBRARY_WINE_TYPES,
+    PRICE_APPRECIATION_ANNUAL,
+    PRICE_APPRECIATION_MAX_YEARS,
     PRICE_BAND_TOP,
     PRICE_BANDS,
+    PRICE_INFLATION_ANNUAL,
+    PRICE_SNAPSHOT_YEAR,
     PRICE_USD_PER_EUR,
     RECOMMEND_HORIZON_YEARS,
     VALUE_PRICE_CAP_EUR,
@@ -112,8 +116,9 @@ def join_price(candidates: pl.DataFrame, price: pl.DataFrame | None) -> pl.DataF
 
     `price=None` (no snapshot on disk) still produces every price column, all
     null with `match_confidence="none"`, so downstream code takes one path
-    whether or not prices exist. Source prices are USD; `price_eur` applies the
-    `PRICE_USD_PER_EUR` FX assumption (the snapshot is a 2017 estimate anyway).
+    whether or not prices exist. Source prices are a 2017 USD snapshot; `price_eur`
+    is that price brought to the opening year (inflation + a per-vintage aging
+    premium, see `_current_price_eur_expr`) and converted to EUR.
     """
     if price is None:
         out = candidates.with_columns(
@@ -126,8 +131,25 @@ def join_price(candidates: pl.DataFrame, price: pl.DataFrame | None) -> pl.DataF
         out = candidates.join(price, on="wine_id", how="left").with_columns(
             pl.col("match_confidence").fill_null("none")
         )
-    out = out.with_columns((pl.col("price_estimate") / PRICE_USD_PER_EUR).alias("price_eur"))
+    out = out.with_columns(
+        _current_price_eur_expr(pl.col("price_estimate"), pl.col("vintage_year")).alias("price_eur")
+    )
     return out.with_columns(_price_band_expr(pl.col("price_eur")).alias("price_band"))
+
+
+def _current_price_eur_expr(price_usd: pl.Expr, vintage_year: pl.Expr) -> pl.Expr:
+    """Bring a 2017 snapshot USD price to opening-year EUR (inflation + aging).
+
+    Two factors compound onto the snapshot: uniform USD inflation from the
+    snapshot year to the opening year, and a fine-wine aging premium over the
+    bottle's age in the opening year (older vintages cost more). The aging
+    exponent is clipped to `[0, PRICE_APPRECIATION_MAX_YEARS]` so ancient vintages
+    don't extrapolate wildly. A null price stays null (unpriced wines).
+    """
+    inflation = (1.0 + PRICE_INFLATION_ANNUAL) ** (DEFAULT_OPENING_YEAR - PRICE_SNAPSHOT_YEAR)
+    bottle_age = (pl.lit(DEFAULT_OPENING_YEAR) - vintage_year).clip(0, PRICE_APPRECIATION_MAX_YEARS)
+    appreciation = pl.lit(1.0 + PRICE_APPRECIATION_ANNUAL).pow(bottle_age)
+    return price_usd * inflation * appreciation / PRICE_USD_PER_EUR
 
 
 def _price_band_expr(price_eur: pl.Expr) -> pl.Expr:

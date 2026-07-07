@@ -176,9 +176,10 @@ def _index_md(type_counts: dict[str, int], coverage: dict[str, int], has_price: 
             "## Price data",
             "",
             "Prices come from the Kaggle [Wine Reviews](" + WINE_REVIEWS_URL + ") dataset "
-            "(zynicide, 2017 snapshot, USD), matched to X-Wines by winery and wine name and shown "
-            "in EUR. **License: CC BY-NC-SA 4.0 — non-commercial.** Do not reuse the value tables "
-            "commercially.",
+            "(zynicide, 2017 snapshot, USD), matched to X-Wines by winery and wine name, then "
+            "adjusted to a 2026 EUR estimate — general inflation plus a per-year aging premium, so "
+            "older vintages read as pricier. **License: CC BY-NC-SA 4.0 — non-commercial.** Do not "
+            "reuse the value tables commercially.",
             "",
         ]
     )

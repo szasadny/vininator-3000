@@ -471,7 +471,13 @@ OUTLIER_PEER_AGG: Literal["max", "mean"] = "max"
 # wine type, with expanded lists for the favorite wines. Reuses the Phase 6
 # recommenders unchanged — these constants only pick what the pages show.
 
-LIBRARY_MIN_VINTAGE = 2016  # exclusive: the library covers vintage_year > this
+# Exclusive floor: the library covers vintage_year > this. Set to 2018 (→ 2019–
+# 2021) after auditing the vintage skew. Scored at a fixed age the vintages
+# 2017–2021 are flat (see best-years.md "Best vintages"), so 2017/2018 dominating
+# the drink-now lists was purely an age artifact: at opening year 2026 an older
+# vintage is swept to a higher age and the model's small positive age slope lifts
+# it. Restricting to 2019+ keeps the swept-age spread (5–7 yrs) narrow.
+LIBRARY_MIN_VINTAGE = 2018
 LIBRARY_WINE_TYPES: tuple[str, ...] = ("Red", "White", "Rosé")
 LIBRARY_MIN_BOTTLES_PER_GRAPE = 100
 LIBRARY_TOP_N = 10
@@ -526,6 +532,20 @@ PRICE_MIN_WINERY_ROWS = 3  # winery-median fallback needs at least this many pri
 # snapshot is old, so this is a rough constant, not a live rate — stated openly.
 PRICE_DISPLAY_CURRENCY = "EUR"
 PRICE_USD_PER_EUR = 1.08  # USD per 1 EUR; price_eur = price_usd / PRICE_USD_PER_EUR
+
+# The snapshot is a 2017 price list, but the library values everything as of the
+# opening year (DEFAULT_OPENING_YEAR, 2026). join_price bridges the gap with two
+# compounding adjustments, applied at join time because they need the per-row
+# vintage that price.parquet doesn't carry:
+#   1. Inflation — general USD price rise from the snapshot year to the opening
+#      year (uniform across wines). ~3%/yr ≈ +30% over 2017→2026.
+#   2. Aging premium — a bottle gets pricier as it ages; applied over the bottle's
+#      age in the opening year (older vintages cost more), capped so ancient
+#      vintages don't extrapolate to absurd prices.
+PRICE_SNAPSHOT_YEAR = 2017
+PRICE_INFLATION_ANNUAL = 0.03  # approx. US CPI averaged over 2017–2025
+PRICE_APPRECIATION_ANNUAL = 0.04  # fine-wine aging premium per year of bottle age
+PRICE_APPRECIATION_MAX_YEARS = 15  # cap the aging exponent; beyond this is guesswork
 
 # value_score = predicted_rating / price_eur (rating per euro). Price bands are
 # (label, upper bound in EUR, exclusive); above the last bound = cult.

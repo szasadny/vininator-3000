@@ -2,17 +2,30 @@
 
 The pure functions are tested on hand-built frames; `build_catalog_section` and
 `vintage_quality` run against the synthetic `trained_bundles` fixture (whose
-vintages include 2017 and 2020, so the library window is non-empty).
+vintages include 2020, so the library window `vintage_year > 2018` is non-empty).
 """
 
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
-from vininator.config import PRICE_SOURCE, PRICE_SOURCE_CURRENCY, Settings
+from vininator.config import (
+    DEFAULT_OPENING_YEAR,
+    PRICE_APPRECIATION_ANNUAL,
+    PRICE_INFLATION_ANNUAL,
+    PRICE_SNAPSHOT_YEAR,
+    PRICE_SOURCE,
+    PRICE_SOURCE_CURRENCY,
+    PRICE_USD_PER_EUR,
+    VALUE_PRICE_CAP_EUR,
+    Settings,
+)
 from vininator.recommend.drink_now import build_candidates, load_recommend_bundles
 from vininator.recommend.library import (
     LIBRARY_DRINK_NOW_COLS,
+    _current_price_eur_expr,
+    _price_band_expr,
     build_catalog_section,
     favorite_slices,
     filter_library_candidates,
@@ -39,20 +52,22 @@ def _candidates() -> pl.DataFrame:
 
 def test_filter_vintage_window_excludes_old() -> None:
     window = filter_vintage_window(_candidates())
-    assert sorted(window.get_column("wine_id").to_list()) == [2, 3, 4, 5, 6]  # drops 2015
+    # Window is vintage_year > 2018, so 2015 and 2018 both drop; 2019/2020 stay.
+    assert sorted(window.get_column("wine_id").to_list()) == [3, 4, 5, 6]
 
 
 def test_filter_library_candidates_drops_blends_types_and_null_grape() -> None:
     general = filter_library_candidates(filter_vintage_window(_candidates()))
-    # Keeps monogrape Red/White with a grape: wines 2, 3, 6. Drops the blend (4),
-    # the Sparkling (5), and the pre-window wine (1).
-    assert sorted(general.get_column("wine_id").to_list()) == [2, 3, 6]
+    # Keeps monogrape Red/White with a grape: wines 3, 6. Drops the blend (4), the
+    # Sparkling (5), and the pre-window wines (1 @2015, 2 @2018).
+    assert sorted(general.get_column("wine_id").to_list()) == [3, 6]
 
 
 def test_list_grape_groups_threshold_and_ordering() -> None:
     general = filter_library_candidates(filter_vintage_window(_candidates()))
     groups = list_grape_groups(general, min_bottles=2)
-    # Only (Red, Merlot) has >= 2 bottles (wines 3, 6); (White, Riesling) has 1.
+    # Only (Red, Merlot) clears the threshold (wines 3, 6); the White Riesling
+    # (wine 2 @2018) is out of the vintage window entirely.
     assert groups.get_column("grape_majority").to_list() == ["Merlot"]
     assert groups.get_column("n_bottles").to_list() == [2]
 
@@ -91,29 +106,59 @@ def test_join_price_none_path_all_null() -> None:
     assert joined.get_column("price_band").null_count() == joined.height
 
 
-def test_join_price_bands_and_eur_conversion() -> None:
+def test_join_price_adjusts_and_bands() -> None:
     price = pl.DataFrame(
         {
-            "wine_id": [2, 3, 6],
-            "price_estimate": [10.8, 43.2, 216.0],  # /1.08 -> 10, 40, 200 EUR
+            "wine_id": [2, 3, 6],  # vintages 2018, 2019, 2019
+            "price_estimate": [100.0, 100.0, 8.0],
             "price_source": [PRICE_SOURCE] * 3,
             "price_currency": [PRICE_SOURCE_CURRENCY] * 3,
             "match_confidence": ["exact", "winery-median", "exact"],
         }
     )
     joined = join_price(_candidates(), price).sort("wine_id")
-    banded = {
-        r["wine_id"]: (round(r["price_eur"], 2), r["price_band"])
-        for r in joined.iter_rows(named=True)
-        if r["price_eur"] is not None
-    }
-    assert banded[2] == (10.0, "budget")  # < 15
-    assert banded[3] == (40.0, "premium")  # 40 is not < 40 -> premium bucket
-    assert banded[6] == (200.0, "cult")  # >= 150
+    by_id = {r["wine_id"]: r for r in joined.iter_rows(named=True)}
+    # Same 100 USD: wine 2 (vintage 2018) is a year older than wine 3 (2019), so
+    # its aging premium is larger -> higher adjusted EUR price.
+    assert by_id[2]["price_eur"] > by_id[3]["price_eur"]
+    # Adjustment lifts price above the naive USD/FX floor (inflation + aging > 1).
+    assert by_id[3]["price_eur"] > 100.0 / PRICE_USD_PER_EUR
+    # Cheap wine lands low, expensive wine high, after banding on the adjusted EUR.
+    assert by_id[6]["price_band"] in {"budget", "mid"}
+    assert by_id[2]["price_band"] in {"premium", "cult"}
     # Unmatched wines keep null price + "none".
-    assert joined.filter(pl.col("wine_id") == 1).get_column("match_confidence").to_list() == [
-        "none"
+    assert by_id[1]["match_confidence"] == "none"
+    assert by_id[1]["price_eur"] is None
+
+
+def test_price_band_expr_boundaries() -> None:
+    df = pl.DataFrame({"price_eur": [14.99, 15.0, 39.99, 40.0, 149.0, 150.0, None]})
+    banded = df.with_columns(_price_band_expr(pl.col("price_eur")).alias("band"))
+    assert banded.get_column("band").to_list() == [
+        "budget",
+        "mid",
+        "mid",
+        "premium",
+        "premium",
+        "cult",
+        None,
     ]
+
+
+def test_current_price_eur_adjustment_isolates_factors() -> None:
+    # Row A: vintage == opening year -> age 0 -> only inflation + FX, no aging.
+    # Row B: a 2021 bottle (age 5 in 2026) -> inflation + 5 years of aging + FX.
+    df = pl.DataFrame(
+        {"price_estimate": [100.0, 100.0], "vintage_year": [DEFAULT_OPENING_YEAR, 2021]}
+    )
+    out = df.with_columns(
+        _current_price_eur_expr(pl.col("price_estimate"), pl.col("vintage_year")).alias("eur")
+    )
+    inflation = (1.0 + PRICE_INFLATION_ANNUAL) ** (DEFAULT_OPENING_YEAR - PRICE_SNAPSHOT_YEAR)
+    eur = out.get_column("eur").to_list()
+    assert eur[0] == pytest.approx(100.0 * inflation / PRICE_USD_PER_EUR, rel=1e-9)
+    aging = (1.0 + PRICE_APPRECIATION_ANNUAL) ** 5
+    assert eur[1] == pytest.approx(100.0 * inflation * aging / PRICE_USD_PER_EUR, rel=1e-9)
 
 
 def _scored(prices: list[float | None]) -> pl.DataFrame:
@@ -240,8 +285,9 @@ def test_build_catalog_section_priced(trained_bundles: Settings) -> None:
         top=5,
     )
     assert section.n_priced == section.n_bottles
-    assert not section.best_value.is_empty()  # 25 USD ~ 23 EUR, under the cap
-    assert section.best_value.get_column("price_eur").to_list()[0] < 30
+    # 25 USD snapshot, adjusted to ~2026 EUR, still clears the value cap.
+    assert not section.best_value.is_empty()
+    assert section.best_value.get_column("price_eur").to_list()[0] < VALUE_PRICE_CAP_EUR
 
 
 def test_vintage_quality_one_row_per_type_vintage(trained_bundles: Settings) -> None:
