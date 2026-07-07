@@ -18,9 +18,11 @@ Under the hood: every rating in X-Wines is timestamped against its vintage, so `
 
 ## Status
 
-Complete — all seven phases (data, terroir pipeline, features, modeling, evaluation, recommender, findings publication) are done. See [RESULTS.md](./RESULTS.md) for the picks and the model-quality numbers, and [PROJECT.md](./PROJECT.md) for the full plan.
+Finished. The models are trained and the picks are published:
 
-This is a batch / CLI project — no hosted UI, no live API. The deliverable is the four ranking tables in [RESULTS.md](./RESULTS.md), backed by the trained models and the honest model-quality numbers that say how much to trust each list.
+- [**RESULTS.md**](./RESULTS.md) — the headline picks, plus the model-quality numbers, ablations and SHAP that say how much to trust them.
+- [**Recommendation library**](reports/recommendations/README.md) — browsable drink-now, age-well, future-greats and best-value lists for every well-covered grape (red / white / rosé), with deeper lists for the house favorites.
+- [**PROJECT.md**](./PROJECT.md) — the plan and the seven phases behind it.
 
 ---
 
@@ -92,8 +94,14 @@ uv run vininator recommend age-well  --opening-year 2026 --horizon 10 --grape ne
 uv run vininator recommend standout-years --from-year 2026 --to-year 2031
 uv run vininator recommend outliers --opening-year 2026
 
-# 8. Regenerate RESULTS.md + the per-grape tables from the trained artifacts
+# 8. (Optional) Match a price snapshot for the value tables.
+#    Manual drop: data/raw/wine_reviews/winemag-data-130k-v2.csv from
+#    https://www.kaggle.com/datasets/zynicide/wine-reviews (CC BY-NC-SA, non-commercial).
+uv run vininator features price
+
+# 9. Regenerate RESULTS.md + the browsable recommendation library
 uv run python scripts/build_results.py
+uv run python scripts/build_library.py   # → reports/recommendations/
 ```
 
 ---

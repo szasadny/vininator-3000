@@ -5,6 +5,7 @@ data/processed/*
 data/snapshots/*
 data/models/*
 reports/tables/*
+reports/recommendations/tables/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep

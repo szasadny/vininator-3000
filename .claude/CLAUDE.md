@@ -35,10 +35,10 @@ For the full plan, phases, and sequencing, see [PROJECT.md](../PROJECT.md). That
 ```text
 src/vininator/
   data/         # X-Wines loader, geocoding (cached, resumable)
-  features/     # climate.py (NASA POWER → GDD/precip/anomalies), soil.py, terroir.py (joiner), text.py (Harmonize parsing), build.py (assemble final table)
+  features/     # climate.py (NASA POWER → GDD/precip/anomalies), soil.py, terroir.py (joiner), text.py (Harmonize parsing), build.py (assemble final table), price.py (post-hoc price snapshot match)
   models/       # dataset.py (shared feature contract + cell aggregation), rating.py, profile.py, harmonize.py, artifacts.py, tracking.py
   eval/         # metrics, ablations, SHAP, sanity, report_data (RESULTS.md assembly)
-  recommend/    # drink_now.py, age_well.py, standout_years.py, outliers.py (Phase 6)
+  recommend/    # drink_now.py, age_well.py, standout_years.py, outliers.py (Phase 6), library.py (per-grape catalog + price/value join)
   cli.py        # typer CLI entrypoint: `vininator train rating`, etc.
 
 data/
@@ -48,12 +48,13 @@ data/
   models/       # trained bundles (.cbm + .meta.json), gitignored
 
 reports/
-  figures/      # SHAP + ablation charts embedded in RESULTS.md (tracked)
-  tables/       # per-grape / region recommendation parquets for RESULTS.md (gitignored)
+  figures/          # SHAP + ablation charts embedded in RESULTS.md (tracked)
+  tables/           # per-grape / region recommendation parquets for RESULTS.md (gitignored)
+  recommendations/  # browsable per-grape library markdown (tracked); tables/ subdir gitignored
 
 notebooks/      # exploration only — see PROJECT.md §5 for the numbered list
 configs/        # yaml per experiment
-scripts/        # build_results.py — emits RESULTS.md tables + figures
+scripts/        # build_results.py (RESULTS.md), build_library.py (reports/recommendations/ pages)
 tests/
 ```
 

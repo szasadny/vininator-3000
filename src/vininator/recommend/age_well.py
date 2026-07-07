@@ -31,6 +31,7 @@ from vininator.recommend.drink_now import (
     RecommendFilters,
     apply_filters,
     build_candidates,
+    collapse_distinct_wines,
     enrich_profile,
     load_recommend_bundles,
     score_at_opening_year,
@@ -73,6 +74,7 @@ def recommend_age_well(
     horizon: int = RECOMMEND_HORIZON_YEARS,
     filters: RecommendFilters | None = None,
     top: int = RECOMMEND_TOP_N,
+    distinct_wines: bool = False,
     out_path: Path | None = None,
     summary_path: Path | None = None,
     candidates: pl.DataFrame | None = None,
@@ -86,6 +88,8 @@ def recommend_age_well(
     candidate copy). The long sweep goes to `out_path`; the per-bottle summary —
     peak year/rating, slope to peak, trajectory — goes to `summary_path`. The
     returned `table` is the top-`top` non-declining bottles by peak rating.
+    `distinct_wines=True` collapses that table to one row per wine (its best
+    vintage) before the top-`top`, matching `recommend_drink_now`.
 
     Pass the raw `candidates` frame and `bundles` to reuse them across calls (see
     `recommend_drink_now`); this call still applies its own filters.
@@ -116,11 +120,12 @@ def recommend_age_well(
     long = pl.concat(per_year)
 
     summary = _summarize(long, opening_year=opening_year)
-    table = (
-        summary.filter(pl.col("trajectory") != "declining")
-        .sort(["predicted_peak_rating", "wine_id", "vintage_year"], descending=[True, False, False])
-        .head(top)
+    ranked = summary.filter(pl.col("trajectory") != "declining").sort(
+        ["predicted_peak_rating", "wine_id", "vintage_year"], descending=[True, False, False]
     )
+    if distinct_wines:
+        ranked = collapse_distinct_wines(ranked)
+    table = ranked.head(top)
 
     write_ranking_parquet(long, out_path)
     write_ranking_parquet(summary, summary_path)

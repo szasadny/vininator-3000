@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -68,6 +69,13 @@ _PROFILE_BUNDLE_BY_TARGET = {"body_label": BODY_BUNDLE, "acidity_label": ACIDITY
 # ---------------------------------------------------------------------------
 
 
+def write_markdown_atomic(target: Path, content: str) -> None:
+    """Write text via a tmp sibling then rename; LF newlines even on Windows."""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8", newline="\n")
+    tmp.replace(target)
+
+
 def markdown_table(df: pl.DataFrame, *, floats: str = "{:.4f}") -> str:
     """Render a small polars frame as a GitHub markdown table.
 
@@ -90,6 +98,89 @@ def markdown_table(df: pl.DataFrame, *, floats: str = "{:.4f}") -> str:
     separator = "| " + " | ".join("---" for _ in df.columns) + " |"
     body = ["| " + " | ".join(fmt(v) for v in row) + " |" for row in df.iter_rows()]
     return "\n".join([header, separator, *body])
+
+
+# ---------------------------------------------------------------------------
+# Ranking display frames (shared by build_results.py and build_library.py)
+# ---------------------------------------------------------------------------
+
+
+def rating_band(table: pl.DataFrame) -> list[str]:
+    """`"4.32 (4.10-4.55)"` per row — the prediction with its quantile band."""
+    return [
+        f"{p:.2f} ({lo:.2f}-{hi:.2f})"
+        for p, lo, hi in zip(
+            table.get_column("predicted_rating").to_list(),
+            table.get_column("predicted_rating_lo").to_list(),
+            table.get_column("predicted_rating_hi").to_list(),
+            strict=True,
+        )
+    ]
+
+
+def drink_now_display(table: pl.DataFrame) -> pl.DataFrame:
+    """A drink-now / standout ranking as display columns for `markdown_table`."""
+    return pl.DataFrame(
+        {
+            "Winery": table.get_column("winery_name").to_list(),
+            "Wine": table.get_column("wine_name").to_list(),
+            "Region": table.get_column("region_name").to_list(),
+            "Vintage": table.get_column("vintage_year").to_list(),
+            "Predicted (lo-hi)": rating_band(table),
+            "Body": table.get_column("predicted_body").to_list(),
+            "Acidity": table.get_column("predicted_acidity").to_list(),
+            "Pairings": [", ".join(p) for p in table.get_column("top_pairings").to_list()],
+        }
+    )
+
+
+def age_well_display(table: pl.DataFrame) -> pl.DataFrame:
+    """An age-well summary ranking as display columns for `markdown_table`."""
+    return pl.DataFrame(
+        {
+            "Winery": table.get_column("winery_name").to_list(),
+            "Wine": table.get_column("wine_name").to_list(),
+            "Region": table.get_column("region_name").to_list(),
+            "Vintage": table.get_column("vintage_year").to_list(),
+            "Peak yr": table.get_column("predicted_peak_year").to_list(),
+            "Peak": [f"{x:.2f}" for x in table.get_column("predicted_peak_rating").to_list()],
+            "Slope/yr": [f"{x:+.3f}" for x in table.get_column("slope_to_peak").to_list()],
+            "Trajectory": table.get_column("trajectory").to_list(),
+            "Clipped": table.get_column("age_clipped_any").to_list(),
+        }
+    )
+
+
+def grape_display(slug: str) -> str:
+    """`"cabernet-sauvignon"` → `"Cabernet Sauvignon"` for a section heading."""
+    return slug.replace("-", " ").replace("_", " ").title()
+
+
+def value_display(table: pl.DataFrame) -> pl.DataFrame:
+    """A price/value ranking as display columns for `markdown_table`.
+
+    Expects the scored+priced columns produced by `recommend.library.join_price`
+    (`price_eur`, `price_band`, `match_confidence`) alongside the rating band.
+    Rating-per-€10 is shown so the value column reads on the same 0-5 scale as
+    the rating. Unpriced rows never reach here (the value views drop them).
+    """
+    price_eur = table.get_column("price_eur").to_list()
+    predicted = table.get_column("predicted_rating").to_list()
+    return pl.DataFrame(
+        {
+            "Winery": table.get_column("winery_name").to_list(),
+            "Wine": table.get_column("wine_name").to_list(),
+            "Region": table.get_column("region_name").to_list(),
+            "Vintage": table.get_column("vintage_year").to_list(),
+            "Predicted (lo-hi)": rating_band(table),
+            "Price (EUR)": [f"€{p:.0f}" if p is not None else "" for p in price_eur],
+            "Band": table.get_column("price_band").to_list(),
+            "Rating/€10": [
+                f"{r / p * 10:.2f}" if p else "" for r, p in zip(predicted, price_eur, strict=True)
+            ],
+            "Match": table.get_column("match_confidence").to_list(),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

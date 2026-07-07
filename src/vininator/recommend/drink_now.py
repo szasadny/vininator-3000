@@ -317,6 +317,7 @@ def recommend_drink_now(
     opening_year: int = DEFAULT_OPENING_YEAR,
     filters: RecommendFilters | None = None,
     top: int = RECOMMEND_TOP_N,
+    distinct_wines: bool = False,
     out_path: Path | None = None,
     candidates: pl.DataFrame | None = None,
     bundles: Bundles | None = None,
@@ -328,6 +329,12 @@ def recommend_drink_now(
     vintage_year`, sorts by predicted rating, and writes the top-`top` rows to
     `out_path` (default: the configured drink-now parquet). The returned table
     is the same top-`top` slice, for the CLI to print.
+
+    `distinct_wines=True` collapses the ranking to one row per wine (its
+    best-scoring vintage) before taking the top-`top`. Producer identity
+    dominates the model, so the raw ranking is often ten vintages of a single
+    estate; the collapsed view shows ten different wines and is what the
+    published tables use.
 
     Pass `candidates` (the raw, unfiltered `build_candidates()` frame) and
     `bundles` to reuse them across many calls — the generator scores dozens of
@@ -354,13 +361,12 @@ def recommend_drink_now(
 
     # Deterministic tiebreak (wine, vintage) so the ranking is reproducible and
     # matches standout-of-the-year's per-year ordering row-for-row.
-    table = (
-        scored.sort(
-            ["predicted_rating", "wine_id", "vintage_year"], descending=[True, False, False]
-        )
-        .head(top)
-        .select(DRINK_NOW_OUT_COLS)
+    ranked = scored.sort(
+        ["predicted_rating", "wine_id", "vintage_year"], descending=[True, False, False]
     )
+    if distinct_wines:
+        ranked = collapse_distinct_wines(ranked)
+    table = ranked.head(top).select(DRINK_NOW_OUT_COLS)
     write_ranking_parquet(table, out_path)
     notify(notify_fn, f"... wrote {table.height} rows to {out_path}")
     return DrinkNowReport(
@@ -371,6 +377,18 @@ def recommend_drink_now(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def collapse_distinct_wines(ranked: pl.DataFrame) -> pl.DataFrame:
+    """Keep one row per `wine_id` — the first, i.e. best, in an already-sorted frame.
+
+    Producer identity is the single strongest signal in the rating model, so a
+    grape's raw ranking is frequently the same estate's wine across a dozen
+    vintages. Collapsing to the best vintage per wine turns a ten-row table of
+    one wine into ten distinct wines. `maintain_order=True` preserves the caller's
+    sort, so "best" is whatever the caller ranked first.
+    """
+    return ranked.unique(subset="wine_id", keep="first", maintain_order=True)
 
 
 def write_ranking_parquet(df: pl.DataFrame, path: Path) -> None:

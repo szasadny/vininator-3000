@@ -21,6 +21,7 @@ from vininator.config import (
     RECOMMEND_TOP_N,
     STANDOUT_TOP_N,
     STANDOUT_YEAR_RANGE,
+    get_settings,
 )
 from vininator.data.geocode import (
     filter_to_usable,
@@ -34,6 +35,7 @@ from vininator.eval.importance import run_shap_analysis
 from vininator.eval.sanity import sanity_check
 from vininator.features.build import build_processed_tables
 from vininator.features.climate import build_climate_table
+from vininator.features.price import build_price_table
 from vininator.features.soil import build_soil_table
 from vininator.features.terroir import build_terroir_table
 from vininator.models.harmonize import HarmonizeReport, train_harmonize
@@ -215,6 +217,25 @@ def features_terroir(
     """
     path = build_terroir_table(force=force, notify_fn=typer.echo)
     typer.echo(f"Terroir table: {path}")
+
+
+@features_app.command("price")
+def features_price(
+    force: bool = typer.Option(
+        False, "--force", help="Rebuild price.parquet even if it already exists."
+    ),
+) -> None:
+    """Match the Kaggle Wine Reviews price snapshot to X-Wines wines.
+
+    Post-hoc catalog metadata only — price never enters a model. Reads the
+    manual-drop CSV at `data/raw/wine_reviews/winemag-data-130k-v2.csv`
+    (CC BY-NC-SA 4.0, non-commercial) and writes `data/interim/price.parquet`
+    with a USD estimate + match confidence per matched wine. Consumed by
+    `scripts/build_library.py`; errors loudly if the CSV is missing.
+    """
+    priced = build_price_table(force=force, notify_fn=typer.echo)
+    typer.echo(f"priced wines: {priced.height:,}")
+    typer.echo(f"price table: {get_settings().price_parquet}")
 
 
 @features_app.command("build")

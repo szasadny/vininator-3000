@@ -26,6 +26,7 @@ from vininator.recommend.drink_now import (
     apply_static_filters,
     apply_vintage_filters,
     build_candidates,
+    collapse_distinct_wines,
     enrich_profile,
     load_recommend_bundles,
     score_at_opening_year,
@@ -51,6 +52,7 @@ def recommend_standout_years(
     to_year: int = STANDOUT_YEAR_RANGE[1],
     filters: RecommendFilters | None = None,
     top: int = STANDOUT_TOP_N,
+    distinct_wines: bool = False,
     out_path: Path | None = None,
     candidates: pl.DataFrame | None = None,
     bundles: Bundles | None = None,
@@ -84,11 +86,13 @@ def recommend_standout_years(
             continue
         notify(notify_fn, f"... scoring {cands.height:,} wines at {year}")
         scored = score_at_opening_year(cands, year, bundles, age_bounds)
+        ranked = scored.sort(
+            ["predicted_rating", "wine_id", "vintage_year"], descending=[True, False, False]
+        )
+        if distinct_wines:
+            ranked = collapse_distinct_wines(ranked)
         block = (
-            scored.sort(
-                ["predicted_rating", "wine_id", "vintage_year"], descending=[True, False, False]
-            )
-            .head(top)
+            ranked.head(top)
             .select(DRINK_NOW_OUT_COLS)
             .with_columns(pl.lit(year).alias("opening_year"))
             .with_row_index("rank", offset=1)

@@ -13,11 +13,10 @@ Run it after the models and Phase 5 eval artifacts exist:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import polars as pl
 
 from vininator.config import (
+    DEFAULT_OPENING_YEAR,
     MLFLOW_EXPERIMENT,
     MODEL_SEED,
     OUTLIER_MIN_PEER_WINES,
@@ -29,6 +28,8 @@ from vininator.config import (
     RESULTS_SANITY_QUERIES,
     RESULTS_SHOWCASE_REGIONS,
     RESULTS_TABLE_TOP_N,
+    RESULTS_VALUE_CAP_EUR,
+    RESULTS_VALUE_TABLE_N,
     STANDOUT_TOP_N,
     STANDOUT_YEAR_RANGE,
     WINE_SPLIT_SEED,
@@ -36,7 +37,10 @@ from vininator.config import (
 )
 from vininator.eval.report_data import (
     ablation_table,
+    age_well_display,
     baseline_grid,
+    drink_now_display,
+    grape_display,
     harmonize_eval,
     load_test_wine_vintages,
     markdown_table,
@@ -45,6 +49,8 @@ from vininator.eval.report_data import (
     readme_disclaimer,
     shap_table,
     split_summary,
+    value_display,
+    write_markdown_atomic,
 )
 from vininator.eval.sanity import SanityRow, sanity_check
 from vininator.models.artifacts import load_bundle
@@ -53,10 +59,16 @@ from vininator.recommend.age_well import recommend_age_well
 from vininator.recommend.drink_now import (
     Bundles,
     RecommendFilters,
+    apply_filters,
     build_candidates,
+    collapse_distinct_wines,
+    enrich_profile,
     load_recommend_bundles,
     recommend_drink_now,
+    score_at_opening_year,
+    train_age_bounds,
 )
+from vininator.recommend.library import join_price, value_views
 from vininator.recommend.outliers import recommend_outliers
 from vininator.recommend.standout_years import recommend_standout_years
 
@@ -73,62 +85,14 @@ def _note(message: str) -> None:
     print(message, flush=True)
 
 
-def _grape_display(slug: str) -> str:
-    """`"cabernet-sauvignon"` → `"Cabernet Sauvignon"` for a section heading."""
-    return slug.replace("-", " ").replace("_", " ").title()
-
-
 def _slug_fname(slug: str) -> str:
     """Filesystem-safe parquet stem for a slug (`"syrah/shiraz"` → `"syrah-shiraz"`)."""
     return slug.replace("/", "-").replace(" ", "-")
 
 
 # ---------------------------------------------------------------------------
-# Table display helpers (numbers pre-formatted; markdown_table renders the rest)
+# Table display helpers (drink-now / age-well displays live in eval/report_data)
 # ---------------------------------------------------------------------------
-
-
-def _band(table: pl.DataFrame) -> list[str]:
-    return [
-        f"{p:.2f} ({lo:.2f}-{hi:.2f})"
-        for p, lo, hi in zip(
-            table.get_column("predicted_rating").to_list(),
-            table.get_column("predicted_rating_lo").to_list(),
-            table.get_column("predicted_rating_hi").to_list(),
-            strict=True,
-        )
-    ]
-
-
-def _drink_now_display(table: pl.DataFrame) -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "Winery": table.get_column("winery_name").to_list(),
-            "Wine": table.get_column("wine_name").to_list(),
-            "Region": table.get_column("region_name").to_list(),
-            "Vintage": table.get_column("vintage_year").to_list(),
-            "Predicted (lo-hi)": _band(table),
-            "Body": table.get_column("predicted_body").to_list(),
-            "Acidity": table.get_column("predicted_acidity").to_list(),
-            "Pairings": [", ".join(p) for p in table.get_column("top_pairings").to_list()],
-        }
-    )
-
-
-def _age_well_display(table: pl.DataFrame) -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "Winery": table.get_column("winery_name").to_list(),
-            "Wine": table.get_column("wine_name").to_list(),
-            "Region": table.get_column("region_name").to_list(),
-            "Vintage": table.get_column("vintage_year").to_list(),
-            "Peak yr": table.get_column("predicted_peak_year").to_list(),
-            "Peak": [f"{x:.2f}" for x in table.get_column("predicted_peak_rating").to_list()],
-            "Slope/yr": [f"{x:+.3f}" for x in table.get_column("slope_to_peak").to_list()],
-            "Trajectory": table.get_column("trajectory").to_list(),
-            "Clipped": table.get_column("age_clipped_any").to_list(),
-        }
-    )
 
 
 def _outlier_display(table: pl.DataFrame) -> pl.DataFrame:
@@ -178,6 +142,7 @@ def _grape_drink_now(slug: str, cap: int | None, candidates: pl.DataFrame, bundl
         return recommend_drink_now(
             filters=RecommendFilters(grape=slug, max_vintage_age=cap),
             top=RESULTS_TABLE_TOP_N,
+            distinct_wines=True,
             out_path=settings.report_tables_dir / f"drink_now_{_slug_fname(slug)}.parquet",
             candidates=candidates,
             bundles=bundles,
@@ -193,6 +158,7 @@ def _grape_age_well(slug: str, candidates: pl.DataFrame, bundles: Bundles):
         return recommend_age_well(
             filters=RecommendFilters(grape=slug),
             top=RESULTS_TABLE_TOP_N,
+            distinct_wines=True,
             out_path=settings.report_tables_dir / f"age_well_{_slug_fname(slug)}.parquet",
             summary_path=settings.report_tables_dir
             / f"age_well_summary_{_slug_fname(slug)}.parquet",
@@ -212,6 +178,7 @@ def _showcase_block(slug: str, display: str, candidates: pl.DataFrame, bundles: 
         report = recommend_drink_now(
             filters=RecommendFilters(region=slug, monogrape=False),
             top=RESULTS_TABLE_TOP_N,
+            distinct_wines=True,
             out_path=settings.report_tables_dir / f"drink_now_region_{fname}.parquet",
             candidates=candidates,
             bundles=bundles,
@@ -220,7 +187,7 @@ def _showcase_block(slug: str, display: str, candidates: pl.DataFrame, bundles: 
         return f"#### {display}\n\nNo wines matched.\n"
     return (
         f"#### {display}\n\n```bash\n{cmd}\n```\n\n"
-        + markdown_table(_drink_now_display(report.table))
+        + markdown_table(drink_now_display(report.table))
         + "\n"
     )
 
@@ -245,10 +212,10 @@ def _section_1(drink_now, age_well, outliers, model_cell, best_name, best_cell) 
         "## 1. Headline: the picks",
         "",
         "**Top drink-now bottles (2026, all monogrape wines):**",
-        markdown_table(_drink_now_display(drink_now.table.head(3))),
+        markdown_table(drink_now_display(drink_now.table.head(3))),
         "",
         "**Top cellar candidates (rising or late-peaking within 10 years):**",
-        markdown_table(_age_well_display(age_well.table.head(3))),
+        markdown_table(age_well_display(age_well.table.head(3))),
         "",
         "**Biggest overperformers vs. peer baseline:**",
         markdown_table(_outlier_display(outliers.table.head(3))),
@@ -258,6 +225,12 @@ def _section_1(drink_now, age_well, outliers, model_cell, best_name, best_cell) 
             f"against {best_cell:.4f} for the best leakage-safe baseline ({best_name}) - so the "
             "rankings clear the best peer average, which is the bar that makes them picks rather "
             "than noise."
+        ),
+        "",
+        (
+            "Every ranking below is collapsed to **one row per wine** (its best-scoring vintage). "
+            "Without that, producer dominance (§7.1) fills each list with a single estate across a "
+            "dozen vintages; the collapse trades that for genuinely different wines."
         ),
     ]
     return "\n".join(parts)
@@ -287,7 +260,7 @@ def _section_2(rating_meta: dict, splits: pl.DataFrame) -> str:
 
 def _grape_block(slug: str, cap: int | None, drink_now, age_well) -> tuple[str, str]:
     """Return the (drink-now, age-well) markdown blocks for one grape."""
-    name = _grape_display(slug)
+    name = grape_display(slug)
     cap_flag = f" --max-vintage-age {cap}" if cap is not None else ""
     dn_cmd = f"vininator recommend drink-now --grape {slug}{cap_flag} --top {RESULTS_TABLE_TOP_N}"
     aw_cmd = f"vininator recommend age-well --grape {slug} --top {RESULTS_TABLE_TOP_N}"
@@ -297,7 +270,7 @@ def _grape_block(slug: str, cap: int | None, drink_now, age_well) -> tuple[str, 
     else:
         dn = (
             f"#### {name}\n\n```bash\n{dn_cmd}\n```\n\n"
-            + markdown_table(_drink_now_display(drink_now.table))
+            + markdown_table(drink_now_display(drink_now.table))
             + "\n"
         )
 
@@ -306,7 +279,7 @@ def _grape_block(slug: str, cap: int | None, drink_now, age_well) -> tuple[str, 
     else:
         aw = (
             f"#### {name}\n\n```bash\n{aw_cmd}\n```\n\n"
-            + markdown_table(_age_well_display(age_well.table))
+            + markdown_table(age_well_display(age_well.table))
             + "\n"
         )
     return dn, aw
@@ -319,6 +292,12 @@ def _section_3(grape_blocks: list[tuple[str, str]], showcase_blocks: list[str]) 
         [
             "## 3. Drink-now and age-well rankings",
             "",
+            "How to read these: the model's aging slope is small and almost always positive "
+            "(dropping `age_at_review` costs only ~0.014 cell-RMSE, §7.2), so **age-well is close to "
+            "drink-now re-ranked** and the `Peak yr` column lands at the 2036 horizon by slow "
+            'accumulation, not a modelled maturity curve. Read age-well as "still improving '
+            'slightly", not "will transform with age". Tables are one row per wine (best vintage).',
+            "",
             "### 3.1 Drink-now (opening year 2026)",
             "",
             "Top monogrape wines predicted to drink best in 2026, per grape. Aromatic whites "
@@ -328,7 +307,8 @@ def _section_3(grape_blocks: list[tuple[str, str]], showcase_blocks: list[str]) 
             "### 3.2 Age-well (2026 to 2036)",
             "",
             "Top monogrape wines whose predicted trajectory still rises or peaks late within the "
-            "10-year horizon. `Clipped` marks bottles whose swept age left the trained range.",
+            "10-year horizon. `Clipped` marks bottles whose swept age left the trained range. See "
+            "the note under §3 on why these lists resemble 3.1.",
             "",
             age_well_blocks,
             "### 3.3 Blends the monogrape filter hides",
@@ -342,21 +322,22 @@ def _section_3(grape_blocks: list[tuple[str, str]], showcase_blocks: list[str]) 
     )
 
 
-def _section_4(standout, years: list[int], outliers) -> str:
+def _section_4(standout, years: list[int], outliers, value_table: pl.DataFrame | None) -> str:
     parts = [
         "## 4. Standouts and overperformers",
         "",
         "### 4.1 Standout wines of the year (2026 to 2031)",
         "",
-        "One shortlist per drinking year - the wines predicted to be at their best that year. "
-        "Produced by `vininator recommend standout-years`. A wine can recur across years when its "
-        "trajectory plateaus.",
+        "One shortlist per drinking year (one row per wine) - the wines predicted to be at their "
+        "best that year. Produced by `vininator recommend standout-years`. Because the aging slope "
+        "is near zero (§3), the shortlists barely move year to year; the same names recur with "
+        "predictions creeping up a few hundredths.",
         "",
     ]
     for year in years:
         block = standout.table.filter(pl.col("opening_year") == year)
         parts.append(f"**{year}**")
-        parts.append(markdown_table(_drink_now_display(block)))
+        parts.append(markdown_table(drink_now_display(block)))
         parts.append("")
 
     parts += [
@@ -369,7 +350,27 @@ def _section_4(standout, years: list[int], outliers) -> str:
         "",
         markdown_table(_outlier_display(outliers.table)),
         "",
-        "### 4.3 Ranking caveats",
+        f"### 4.3 Best value under €{int(RESULTS_VALUE_CAP_EUR)}",
+        "",
+        "Best-rated monogrape wines (opening year 2026) priced at or under "
+        f"€{int(RESULTS_VALUE_CAP_EUR)}. Price is post-hoc metadata from the Wine Reviews snapshot "
+        "(2017, USD, shown in EUR) - never a model input. Only **exact** winery+wine-name matches "
+        "count here: the coarser winery-median estimate underprices a winery's flagship, so it is "
+        "excluded from value rankings. Coverage skews to famous names. See the recommendation "
+        "library for per-grape value lists.",
+        "",
+    ]
+    if value_table is None:
+        parts.append(
+            "_No price snapshot found; run `uv run vininator features price` to populate this._"
+        )
+    elif value_table.is_empty():
+        parts.append("_No priced monogrape wines under the cap._")
+    else:
+        parts.append(markdown_table(value_display(value_table)))
+    parts += [
+        "",
+        "### 4.4 Ranking caveats",
         "",
         "- Rankings are conditional on wines *in X-Wines*, not the whole wine world.",
         "- Producer effects dominate, so lists skew toward well-rated wineries - signal, not bug.",
@@ -378,8 +379,37 @@ def _section_4(standout, years: list[int], outliers) -> str:
         "- Climate is region-centroid, not vineyard-parcel (see the README disclaimer).",
         "- Outliers are only as trustworthy as their baseline; sparse peer cells are excluded by the "
         f"{OUTLIER_MIN_PEER_WINES}-wine support gate.",
+        "- Value tables use only exact-priced wines; unpriced and winery-median-only wines are "
+        "dropped, not ranked low. Prices are a 2017 USD snapshot converted to EUR at a fixed rate.",
     ]
     return "\n".join(parts)
+
+
+def _value_under_cap(
+    candidates: pl.DataFrame, bundles: Bundles, price: pl.DataFrame | None
+) -> pl.DataFrame | None:
+    """Best-rated monogrape wines priced under the euro cap, at opening year 2026.
+
+    Returns None when no price snapshot exists. Reuses the recommender scoring
+    path and the library's price join + value view — price never touches a model.
+    """
+    if price is None:
+        return None
+    priced = join_price(candidates, price)
+    filtered = apply_filters(priced, RecommendFilters(), DEFAULT_OPENING_YEAR)
+    scored = enrich_profile(
+        score_at_opening_year(filtered, DEFAULT_OPENING_YEAR, bundles, train_age_bounds()), bundles
+    )
+    distinct = collapse_distinct_wines(
+        scored.sort(
+            ["predicted_rating", "wine_id", "vintage_year"], descending=[True, False, False]
+        )
+    )
+    # Exact price matches only: winery-median estimates underprice a winery's
+    # flagship and would salt the value ranking with mispriced trophies.
+    exact = distinct.filter(pl.col("match_confidence") == "exact")
+    under_cap, _ = value_views(exact, top=RESULTS_VALUE_TABLE_N, cap_eur=RESULTS_VALUE_CAP_EUR)
+    return under_cap
 
 
 def _section_5(grids: dict[str, pl.DataFrame], coverage: pl.DataFrame) -> str:
@@ -608,17 +638,26 @@ def main() -> None:
     candidates = build_candidates(_note)
 
     drink_now = recommend_drink_now(
-        top=RECOMMEND_TOP_N, candidates=candidates, bundles=bundles, notify_fn=_note
+        top=RECOMMEND_TOP_N,
+        distinct_wines=True,
+        candidates=candidates,
+        bundles=bundles,
+        notify_fn=_note,
     )
     age_well = recommend_age_well(
         top=RECOMMEND_TOP_N,
         horizon=RECOMMEND_HORIZON_YEARS,
+        distinct_wines=True,
         candidates=candidates,
         bundles=bundles,
         notify_fn=_note,
     )
     standout = recommend_standout_years(
-        top=STANDOUT_TOP_N, candidates=candidates, bundles=bundles, notify_fn=_note
+        top=STANDOUT_TOP_N,
+        distinct_wines=True,
+        candidates=candidates,
+        bundles=bundles,
+        notify_fn=_note,
     )
     outliers = recommend_outliers(
         top=RESULTS_OUTLIER_TABLE_N, candidates=candidates, bundles=bundles, notify_fn=_note
@@ -635,6 +674,8 @@ def main() -> None:
         _showcase_block(slug, display, candidates, bundles)
         for slug, display in RESULTS_SHOWCASE_REGIONS
     ]
+
+    value_table = _value_under_cap(candidates, bundles, _load_price())
     del candidates, bundles
 
     _note("[5/6] sanity check")
@@ -656,7 +697,7 @@ def main() -> None:
         _section_1(drink_now, age_well, outliers, model_cell, best[0], best[1]),
         _section_2(rating_meta, splits),
         _section_3(grape_blocks, showcase_blocks),
-        _section_4(standout, standout.years_covered or years, outliers),
+        _section_4(standout, standout.years_covered or years, outliers, value_table),
         _section_5(grids, coverage),
         _section_6(body, acidity, harm),
         _section_7(ablations, shap_top, shap_block),
@@ -666,8 +707,17 @@ def main() -> None:
         _acknowledgements(),
     ]
     document = "\n\n---\n\n".join(sections) + "\n"
-    _write_atomic(settings.results_md, document)
+    write_markdown_atomic(settings.results_md, document)
     _note(f"wrote {settings.results_md}")
+
+
+def _load_price() -> pl.DataFrame | None:
+    """The price snapshot for §4.3, or None when it hasn't been built."""
+    path = get_settings().price_parquet
+    if not path.exists():
+        _note(f"    no price snapshot at {path} - §4.3 value table will be a note")
+        return None
+    return pl.read_parquet(path)
 
 
 def _best_baseline(test_grid: pl.DataFrame) -> tuple[str, float]:
@@ -676,13 +726,6 @@ def _best_baseline(test_grid: pl.DataFrame) -> tuple[str, float]:
         ~pl.col("predictor").is_in(["model (CatBoost)", "noise_floor"])
     ).sort("cell_rmse")
     return baselines.get_column("predictor")[0], float(baselines.get_column("cell_rmse")[0])
-
-
-def _write_atomic(target: Path, content: str) -> None:
-    """Write text via a tmp sibling then rename; LF newlines even on Windows."""
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8", newline="\n")
-    tmp.replace(target)
 
 
 if __name__ == "__main__":

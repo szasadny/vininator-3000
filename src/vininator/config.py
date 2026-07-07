@@ -462,6 +462,77 @@ AGE_WELL_PLATEAU_EPS = 0.02
 OUTLIER_MIN_PEER_WINES = 5
 OUTLIER_PEER_AGG: Literal["max", "mean"] = "max"
 
+# ---------------------------------------------------------------------------
+# Recommendation library (scripts/build_library.py)
+# ---------------------------------------------------------------------------
+#
+# A browsable per-grape catalog under reports/recommendations/: top-N lists for
+# recent wines (drink-now, age-well, future greats, best value), grouped by
+# wine type, with expanded lists for the favorite wines. Reuses the Phase 6
+# recommenders unchanged — these constants only pick what the pages show.
+
+LIBRARY_MIN_VINTAGE = 2016  # exclusive: the library covers vintage_year > this
+LIBRARY_WINE_TYPES: tuple[str, ...] = ("Red", "White", "Rosé")
+LIBRARY_MIN_BOTTLES_PER_GRAPE = 100
+LIBRARY_TOP_N = 10
+LIBRARY_FUTURE_PEAK_MIN_YEAR = 2030  # "future great" = peaks this year or later
+
+# Favorites get deeper lists. Grape favorites are monogrape slices; region
+# favorites are wine *styles* (blends defined by their region — Amarone is a
+# Corvina-based blend, Super Tuscans are Toscana IGT blends), sliced by
+# region_name with the monogrape filter off, Red only.
+LIBRARY_FAVORITE_TOP_N = 25
+LIBRARY_FAVORITE_GRAPES: tuple[str, ...] = ("Sangiovese", "Primitivo", "Nero d'Avola")
+LIBRARY_FAVORITE_REGIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Amarone della Valpolicella",
+        (
+            "amarone della valpolicella",
+            "amarone della valpolicella classico",
+            "amarone della valpolicella valpantena",
+        ),
+    ),
+    (
+        "Super Tuscan (Toscana IGT)",
+        ("toscana", "maremma toscana", "colli della toscana centrale", "costa toscana"),
+    ),
+)
+
+# Best-vintages table: compare vintages at the same age so the age effect
+# doesn't confound vintage quality (a 2017 is 9 years old in 2026, a 2021 five).
+LIBRARY_VINTAGE_QUALITY_AGE = 5
+
+# ---------------------------------------------------------------------------
+# Price metadata (features/price.py)
+# ---------------------------------------------------------------------------
+#
+# Price is post-hoc catalog metadata, never a model feature — it joins onto the
+# scored candidate table at library-build time. Source: Kaggle "Wine Reviews"
+# (zynicide) 2017 snapshot, prices in USD, CC BY-NC-SA 4.0 (non-commercial).
+# Static CSV, manual drop like the slim/full X-Wines variants — no auth-gated
+# fetch code.
+
+WINE_REVIEWS_DIRNAME = "wine_reviews"  # under data/raw/
+WINE_REVIEWS_CSV = "winemag-data-130k-v2.csv"
+WINE_REVIEWS_URL = "https://www.kaggle.com/datasets/zynicide/wine-reviews"
+PRICE_PARQUET = "price.parquet"  # under data/interim/
+PRICE_SOURCE = "wine-reviews-2017"
+PRICE_SOURCE_CURRENCY = "USD"  # currency stored in price.parquet (source-native)
+PRICE_MATCH_CONFIDENCES: tuple[str, ...] = ("exact", "winery-median", "none")
+PRICE_MIN_WINERY_ROWS = 3  # winery-median fallback needs at least this many priced rows
+
+# Value views are shown in EUR (the maintainer thinks in euros). Source prices
+# stay USD in the parquet; join_price converts with this FX assumption. The 2017
+# snapshot is old, so this is a rough constant, not a live rate — stated openly.
+PRICE_DISPLAY_CURRENCY = "EUR"
+PRICE_USD_PER_EUR = 1.08  # USD per 1 EUR; price_eur = price_usd / PRICE_USD_PER_EUR
+
+# value_score = predicted_rating / price_eur (rating per euro). Price bands are
+# (label, upper bound in EUR, exclusive); above the last bound = cult.
+VALUE_PRICE_CAP_EUR = 40.0  # the library's per-grape "best under a cap" table
+PRICE_BANDS: tuple[tuple[str, float], ...] = (("budget", 15.0), ("mid", 40.0), ("premium", 150.0))
+PRICE_BAND_TOP = "cult"
+
 # Recommendation output parquets under data/processed/ (consumed by
 # scripts/build_results.py for the RESULTS.md ranking tables).
 RECOMMENDATIONS_DRINK_NOW_PARQUET = "recommendations_drink_now.parquet"
@@ -493,6 +564,10 @@ RESULTS_MAJOR_GRAPES: tuple[tuple[str, int | None], ...] = (
 RESULTS_TABLE_TOP_N = 10  # rows per ranking table in RESULTS.md
 RESULTS_OUTLIER_TABLE_N = 20  # §4.2 shows more rows — the shortlist is the point
 RESULTS_QUANTILE_NOMINAL = 0.8  # 0.1/0.9 heads → nominal 80% band, the coverage target
+# §4.4 value table: best-rated monogrape wines priced under this euro cap. Only
+# renders when the price snapshot exists; degrades to a note otherwise.
+RESULTS_VALUE_CAP_EUR = 50.0
+RESULTS_VALUE_TABLE_N = 15
 
 # Classic blends the monogrape default hides, featured region-filtered in §3.3:
 # (RegionName matched case-insensitively, display heading). Amarone della
@@ -710,6 +785,30 @@ class Settings(BaseSettings):
     def recommendations_outliers_parquet(self) -> Path:
         """Phase 6 overperformer outliers (predicted rating vs. peer baseline)."""
         return self.processed_dir / RECOMMENDATIONS_OUTLIERS_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def wine_reviews_csv(self) -> Path:
+        """Kaggle Wine Reviews price snapshot (manual drop, immutable)."""
+        return self.raw_dir / WINE_REVIEWS_DIRNAME / WINE_REVIEWS_CSV
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def price_parquet(self) -> Path:
+        """Per-wine price estimates matched from the Wine Reviews snapshot."""
+        return self.interim_dir / PRICE_PARQUET
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def recommendations_library_dir(self) -> Path:
+        """The browsable per-grape markdown library (scripts/build_library.py)."""
+        return _project_root() / "reports" / "recommendations"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def library_tables_dir(self) -> Path:
+        """Per-section ranking parquets backing the library pages. Gitignored."""
+        return self.recommendations_library_dir / "tables"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
